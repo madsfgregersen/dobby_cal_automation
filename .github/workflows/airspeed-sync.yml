@@ -1,0 +1,29 @@
+name: Airspeed Sync
+
+on:
+  schedule:
+    - cron: "30 * * * *"      # hourly at :30, offset from meeting-sync at :00
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Airspeed sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          GLYPHIC_API_KEY: ${{ secrets.GLYPHIC_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python airspeed_sync.py
