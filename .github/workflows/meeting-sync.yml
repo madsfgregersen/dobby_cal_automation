@@ -1,0 +1,38 @@
+
+name: Meeting Sync
+ 
+on:
+  schedule:
+    - cron: "0 * * * *"      # hourly, on the hour (GitHub runs this best-effort)
+  workflow_dispatch: {}       # lets you run it manually from the Actions tab
+ 
+permissions:
+  contents: read
+  id-token: write             # REQUIRED — lets the job get a WIF token from GitHub
+ 
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+ 
+      - name: Authenticate to Google (keyless, via Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: "projects/975330914917/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+          service_account: "meeting-sync@dobby-workspace-automations.iam.gserviceaccount.com"
+ 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+ 
+      - name: Run meeting sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          CALENDAR_USERS: ${{ vars.CALENDAR_USERS }}
+        run: python sync.py
+ 
