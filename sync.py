@@ -31,8 +31,8 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 SERVICE_ACCOUNT_EMAIL = "meeting-sync@dobby-workspace-automations.iam.gserviceaccount.com"
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 
-MEETINGS_DB_ID = "280db974-b757-8016-8d47-000bbb24e851"    # Meeting Notes DB
-CUSTOMERS_DB_ID = "280db974-b757-806b-8a47-000b122d128f"   # Customer Database
+MEETINGS_DB_ID = "280db974-b757-8050-b523-c091e4c3ffd3"    # Meeting Notes DB
+CUSTOMERS_DB_ID = "280db974-b757-80f3-a1a0-db38f8c584d4"   # Customer Database
 
 # Attendees on these domains do NOT count as "external". An event with only
 # internal attendees (standups, 1:1s) is skipped.
@@ -68,7 +68,7 @@ _log_lines = []
 
 
 def log(msg):
-    line = f"[{dt.datetime.utcnow().isoformat(timespec='seconds')}Z] {msg}"
+    line = f"[{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] {msg}"
     print(line, flush=True)
     _log_lines.append(line)
 
