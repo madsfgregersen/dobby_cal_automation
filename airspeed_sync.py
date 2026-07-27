@@ -232,6 +232,12 @@ def _bullet(text):
             "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": text[:2000]}}]}}
 
 
+def _todo(text, checked=False):
+    return {"object": "block", "type": "to_do",
+            "to_do": {"rich_text": [{"type": "text", "text": {"content": text[:2000]}}],
+                      "checked": checked}}
+
+
 def _paragraph(text):
     return {"object": "block", "type": "paragraph",
             "paragraph": {"rich_text": [{"type": "text", "text": {"content": text[:2000]}}]}}
@@ -243,17 +249,20 @@ def _heading3(text):
 
 
 def md_to_blocks(text):
-    """Convert Claude's Markdown summary into Notion blocks. The summary's own
-    '## ' section headers become H3 (they sit under the body's H2 'Summary'),
-    and '- '/'* '/'•' lines become bullets. Inline ** markers are stripped."""
+    """Convert Claude's Markdown summary into Notion blocks. '## ' section
+    headers become H3; '- [ ] '/'- [x] ' lines become checkbox to-dos;
+    '- '/'* '/'•' lines become bullets. Inline ** markers are stripped."""
     blocks = []
     for raw in (text or "").split("\n"):
         line = raw.strip().replace("**", "")
         if not line:
             continue
-        m = re.match(r"^#{1,6}\s+(.*)$", line)
-        if m:
-            blocks.append(_heading3(m.group(1)))
+        m_head = re.match(r"^#{1,6}\s+(.*)$", line)
+        m_task = re.match(r"^(?:[-*•]\s+)?\[([ xX])\]\s+(.*)$", line)
+        if m_head:
+            blocks.append(_heading3(m_head.group(1)))
+        elif m_task:
+            blocks.append(_todo(m_task.group(2), m_task.group(1).lower() == "x"))
         elif re.match(r"^[-*•]\s+", line):
             blocks.append(_bullet(re.sub(r"^[-*•]\s+", "", line)))
         else:
@@ -266,6 +275,7 @@ def strip_md(text):
     out = []
     for raw in (text or "").split("\n"):
         line = re.sub(r"^\s*#{1,6}\s*", "", raw).replace("**", "")
+        line = re.sub(r"^\s*(?:[-*•]\s+)?\[[ xX]\]\s+", "• ", line)
         line = re.sub(r"^\s*[-*•]\s+", "• ", line)
         out.append(line)
     return "\n".join(out).strip()
