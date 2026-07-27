@@ -2,7 +2,10 @@ name: Airspeed Sync
 
 on:
   schedule:
-    - cron: "30 * * * *"      # hourly at :30, offset from meeting-sync at :00
+    # Fires every 15 min across 06:00–20:59 UTC — a superset that covers the
+    # 08:00–22:00 CET daytime window in both winter (UTC+1) and summer (UTC+2).
+    # airspeed_sync.py then gates precisely on local CET time and weekday/weekend.
+    - cron: "*/15 6-20 * * *"
   workflow_dispatch: {}
 
 permissions:
