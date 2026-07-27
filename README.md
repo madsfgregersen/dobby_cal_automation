@@ -67,17 +67,21 @@ the results, then widen to the whole team.
 - `Status` — set to `Planned` on creation; set to `Cancelled` if the event is
   cancelled. **Never otherwise changed** — so a `Completed` set later by Step 3
   is safe.
-- `Customer` — set from the attendee-domain match; on later runs only filled if
-  still empty, so a manual correction is never overwritten.
+- `Customer`, `Area`, `Category` — set from the customer match (`Area` =
+  Customer Success, `Category` = Customer call). On later runs each is filled
+  only if still empty, so a manual correction is never overwritten.
 
 **Human-owned (never touched):** the page body (agenda, decision points,
-things-to-remember), plus `Attendees`, `Area`, `Category`, `Project`, `Summary`.
+things-to-remember), plus `Attendees`, `Project`, `Summary`.
 
 ## Behaviour notes
 
-- **Scope:** every meeting in the window is processed, internal ones included.
+- **Scope:** every meeting with at least 2 participants is processed, internal
+  ones included. Meetings with one participant (solo holds/blocks) are skipped.
   Attendee domains are used only to match a customer; an internal-only meeting
   just gets a blank `Customer`.
+- **Customer match also tags the meeting:** when a customer matches, `Area` is
+  set to `Customer Success` and `Category` to `Customer call`.
 - **No customer match:** the record is still created, with `Customer` left blank
   for manual assignment. (The five customers without email handles will land
   here until their handles are filled.)

@@ -56,8 +56,17 @@ P_PARTICIPANTS = "Participants"
 P_EVENT_ID = "Calendar Event ID"
 P_STATUS = "Status"
 P_CUSTOMER = "Customer"
+P_AREA = "Area"
+P_CATEGORY = "Category"
 P_CUST_NAME = "Name"
 P_CUST_EMAIL = "Email"
+
+# Applied to a meeting when it matches a customer.
+CUSTOMER_AREA = "Customer Success"       # exact option name in the Area select
+CUSTOMER_CATEGORY = ["Customer call"]    # exact option name in the Category multi-select
+
+# A meeting with fewer than this many participants is skipped.
+MIN_PARTICIPANTS = 2
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
@@ -261,6 +270,8 @@ def create_meeting(event_id, title, start, end, participants, customer_id):
     }
     if customer_id:
         props[P_CUSTOMER] = {"relation": [{"id": customer_id}]}
+        props[P_AREA] = {"select": {"name": CUSTOMER_AREA}}
+        props[P_CATEGORY] = {"multi_select": [{"name": c} for c in CUSTOMER_CATEGORY]}
     notion_request(
         "POST",
         "https://api.notion.com/v1/pages",
@@ -269,16 +280,21 @@ def create_meeting(event_id, title, start, end, participants, customer_id):
 
 
 def update_meeting(page, title, start, end, participants, customer_id):
-    """Update machine-owned fields only. Never touch Status. Fill Customer
-    only when it's currently empty (protects any human correction)."""
+    """Update machine-owned fields only. Never touch Status. Fill
+    Customer/Area/Category only when currently empty (protects human edits)."""
     props = {
         P_TITLE: {"title": [{"type": "text", "text": {"content": title[:2000]}}]},
         P_DATE: {"date": {"start": start, "end": end}},
         P_PARTICIPANTS: {"rich_text": _rich_text(participants)},
     }
-    existing_customer = page.get("properties", {}).get(P_CUSTOMER, {}).get("relation", [])
-    if customer_id and not existing_customer:
-        props[P_CUSTOMER] = {"relation": [{"id": customer_id}]}
+    ex = page.get("properties", {})
+    if customer_id:
+        if not ex.get(P_CUSTOMER, {}).get("relation", []):
+            props[P_CUSTOMER] = {"relation": [{"id": customer_id}]}
+        if not ex.get(P_AREA, {}).get("select"):
+            props[P_AREA] = {"select": {"name": CUSTOMER_AREA}}
+        if not ex.get(P_CATEGORY, {}).get("multi_select", []):
+            props[P_CATEGORY] = {"multi_select": [{"name": c} for c in CUSTOMER_CATEGORY]}
     notion_request(
         "PATCH",
         f"https://api.notion.com/v1/pages/{page['id']}",
@@ -315,6 +331,11 @@ def handle_event(ev, domain_map, summary):
 
     attendees = [a for a in ev.get("attendees", []) if not a.get("resource")]
     emails = [a["email"] for a in attendees if a.get("email")]
+
+    if len(emails) < MIN_PARTICIPANTS:
+        summary["skipped"] += 1  # solo blocks / 1-person holds
+        return
+
     domains = {e.split("@")[-1].lower() for e in emails if "@" in e}
     external = domains - INTERNAL_DOMAINS
 
