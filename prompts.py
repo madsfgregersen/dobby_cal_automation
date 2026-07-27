@@ -38,16 +38,16 @@ Discussion Points as flowing prose (3-6 sentences); every other section as \
 short bullets. Assume the reader is a Dobby AE or CS lead who wasn't on the \
 call and needs to act on this within 5 minutes."""
 
-CUSTOMER_SUCCESS = """From the transcript, write a clear, well-rounded summary \
+CUSTOMER_SUCCESS = """From the transcript, write a concise, skimmable summary \
 focused on what a CS lead needs to act on. Use participants' real names. Be \
 specific and factual — never invent detail. Ignore small talk, greetings, and \
 technical join issues. Write in English even if parts of the call are in \
-another language. Structure it under: Decisions & confirmations; Commitments \
-(owner → what → when); Risks & blockers; Requirements & requests; Next steps. \
-Write each point as one or two complete sentences carrying enough context and \
-reasoning to stand on their own — favour clarity and completeness over \
-brevity, while still avoiding filler. Omit any section that has nothing \
-substantive."""
+another language. Structure it under exactly these sections, in this order: \
+Commitments & next steps (each as owner → what → when, including any agreed \
+follow-ups); Decisions & confirmations; Open items & risks (outstanding \
+requirements, customer requests, blockers, and risks to delivery). Keep every \
+point to a single short sentence — enough to stand on its own, but no filler or \
+elaboration. Omit any section that has nothing substantive."""
 
 INTERNAL = """From the transcript, write a clear, well-rounded summary focused \
 on what each team member needs to act on. Use participants' real names. Be \
