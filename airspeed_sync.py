@@ -232,29 +232,61 @@ def _paragraph(text):
             "paragraph": {"rich_text": [{"type": "text", "text": {"content": text[:2000]}}]}}
 
 
-def build_body_children(call):
-    """The blocks appended to the meeting body:
+def _speaker_map(call):
+    m = {}
+    for p in call.get("participants", []):
+        pid = p.get("id")
+        if pid is not None:
+            m[pid] = p.get("name") or f"Speaker {pid}"
+    return m
+
+
+def _turn_block(speaker, timestamp, text):
+    label = f"{speaker} ({timestamp}): " if timestamp else f"{speaker}: "
+    runs = [{"type": "text", "text": {"content": label[:2000]},
+             "annotations": {"bold": True}}]
+    runs += [{"type": "text", "text": {"content": c}} for c in _chunks(text)]
+    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": runs}}
+
+
+def build_body_blocks(call):
+    """The blocks written to the meeting body:
         ## Action points
         - <next step>
         ## Summary
         <summary>
+        ## Transcript
+        **Speaker (mm:ss):** <turn text>
     """
-    children = [_heading("Action points")]
+    blocks = [_heading("Action points")]
     steps = [i.get("value", "") for i in call.get("insights", [])
              if i.get("name") == "next_steps" and i.get("value")]
     if steps:
-        children += [_bullet(s) for s in steps]
+        blocks += [_bullet(s) for s in steps]
     else:
-        children.append(_paragraph("No action points captured."))
+        blocks.append(_paragraph("No action points captured."))
 
-    children.append(_heading("Summary"))
-    children += [_paragraph(c) for c in _chunks(call.get("summary"))]
-    return children
+    blocks.append(_heading("Summary"))
+    blocks += [_paragraph(c) for c in _chunks(call.get("summary"))]
+
+    blocks.append(_heading("Transcript"))
+    turns = call.get("transcript_turns", [])
+    if turns:
+        smap = _speaker_map(call)
+        for t in turns:
+            spk = smap.get(t.get("party_id"), f"Speaker {t.get('party_id')}")
+            blocks.append(_turn_block(spk, t.get("timestamp", ""), t.get("turn_text", "")))
+    else:
+        blocks.append(_paragraph("Transcript not available."))
+    return blocks
 
 
-def append_body(page_id, children):
-    notion_request("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children",
-                   data=json.dumps({"children": children}))
+def append_body(page_id, blocks):
+    # Notion caps children at 100 per request; transcripts often exceed that,
+    # so append in batches of 100.
+    for i in range(0, len(blocks), 100):
+        notion_request("PATCH", f"https://api.notion.com/v1/blocks/{page_id}/children",
+                       data=json.dumps({"children": blocks[i:i + 100]}))
 
 
 def call_emails_and_domains(call):
@@ -288,7 +320,7 @@ def update_record(page, call):
     # append the Action points / Summary blocks to the body.
     notion_request("PATCH", f"https://api.notion.com/v1/pages/{page['id']}",
                    data=json.dumps({"properties": completion_props(call)}))
-    append_body(page["id"], build_body_children(call))
+    append_body(page["id"], build_body_blocks(call))
 
 
 def create_orphan(call, domain_map):
@@ -309,10 +341,10 @@ def create_orphan(call, domain_map):
         props[P_CUSTOMER] = {"relation": [{"id": customer_id}]}
         props[P_AREA] = {"select": {"name": CUSTOMER_AREA}}
         props[P_CATEGORY] = {"multi_select": [{"name": c} for c in CUSTOMER_CATEGORY]}
-    notion_request("POST", "https://api.notion.com/v1/pages",
-                   data=json.dumps({"parent": {"database_id": MEETINGS_DB_ID},
-                                    "properties": props,
-                                    "children": build_body_children(call)}))
+    created = notion_request("POST", "https://api.notion.com/v1/pages",
+                             data=json.dumps({"parent": {"database_id": MEETINGS_DB_ID},
+                                              "properties": props}))
+    append_body(created["id"], build_body_blocks(call))
 
 
 def best_match(call, candidates):
