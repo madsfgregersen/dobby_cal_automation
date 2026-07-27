@@ -19,6 +19,7 @@ import sys
 import time
 import re
 import datetime as dt
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -38,6 +39,14 @@ LOOKBACK_DAYS = 3               # how far back to scan Airspeed for new calls
 MATCH_TOLERANCE_MIN = 30        # start-time window for matching to a record
 MAX_LIST_PAGES = 5              # safety cap on Airspeed list pagination
 NOTION_VERSION = "2022-06-28"
+
+# Run schedule, evaluated in local time (DST handled automatically):
+#   weekdays  — every run (every 15 min) during the active window
+#   weekends  — only the top-of-hour run (hourly) during the active window
+#   nights    — skipped entirely
+LOCAL_TZ = "Europe/Copenhagen"
+ACTIVE_START_HOUR = 8           # inclusive, local time
+ACTIVE_END_HOUR = 22            # exclusive, local time (last activity 21:59)
 
 # Exact Notion property names.
 P_TITLE = "Meeting name"
@@ -467,7 +476,22 @@ def handle_call(call, domain_map, summary):
         summary["orphans"] += 1
 
 
+def within_schedule():
+    """True if this run should proceed, per the local-time schedule."""
+    now = dt.datetime.now(ZoneInfo(LOCAL_TZ))
+    if not (ACTIVE_START_HOUR <= now.hour < ACTIVE_END_HOUR):
+        return False, f"outside active hours ({now:%a %H:%M} {LOCAL_TZ})"
+    if now.weekday() >= 5 and now.minute >= 15:
+        return False, f"weekend — hourly only, skipping :{now.minute:02d} run"
+    return True, ""
+
+
 def main():
+    ok, why = within_schedule()
+    if not ok:
+        log(f"skipping run — {why}")
+        return
+
     if not (NOTION_TOKEN and GLYPHIC_API_KEY and ANTHROPIC_API_KEY):
         log("FATAL: NOTION_TOKEN, GLYPHIC_API_KEY and ANTHROPIC_API_KEY must all be set")
         sys.exit(1)
