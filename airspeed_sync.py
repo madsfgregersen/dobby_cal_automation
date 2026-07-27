@@ -46,7 +46,7 @@ P_CUSTOMER = "Customer"
 P_AREA = "Area"
 P_CATEGORY = "Category"
 P_SUMMARY = "Summary"
-P_RECORDING = "Recording"
+P_RECORDING = "Recording URL"
 P_CUST_NAME = "Name"
 P_CUST_EMAIL = "Email"
 
@@ -135,9 +135,10 @@ def notion_request(method, url, **kwargs):
         if r.status_code == 429 or r.status_code >= 500:
             time.sleep(float(r.headers.get("Retry-After", 1 + attempt)))
             continue
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(f"Notion {r.status_code}: {r.text[:500]}")
         return r.json()
-    r.raise_for_status()
+    raise RuntimeError(f"Notion request failed after retries: {method} {url}")
 
 
 def parse_domains(text):
@@ -277,7 +278,7 @@ def completion_props(call):
         P_AIRSPEED_ID: {"rich_text": _rt(call["id"])},
     }
     if call.get("url_link"):
-        props[P_RECORDING] = {"url": call["url_link"]}
+        props[P_RECORDING] = {"rich_text": _rt(call["url_link"])}
     return props
 
 
