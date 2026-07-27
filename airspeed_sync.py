@@ -22,9 +22,13 @@ import datetime as dt
 
 import requests
 
+from prompts import PROMPTS, FORMAT_INSTRUCTION
+
 # ----------------------------------------------------------------- CONFIG ---
 
 GLYPHIC_BASE = "https://api.glyphic.ai/v1"
+ANTHROPIC_BASE = "https://api.anthropic.com/v1/messages"
+SUMMARY_MODEL = "claude-sonnet-5"
 
 MEETINGS_DB_ID = "280db974-b757-8050-b523-c091e4c3ffd3"    # Meeting Notes DB
 CUSTOMERS_DB_ID = "280db974-b757-80f3-a1a0-db38f8c584d4"   # Customer Database
@@ -55,6 +59,7 @@ CUSTOMER_CATEGORY = ["Customer call"]
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 GLYPHIC_API_KEY = os.environ.get("GLYPHIC_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 # --------------------------------------------------------------- LOGGING ----
@@ -232,6 +237,40 @@ def _paragraph(text):
             "paragraph": {"rich_text": [{"type": "text", "text": {"content": text[:2000]}}]}}
 
 
+def _heading3(text):
+    return {"object": "block", "type": "heading_3",
+            "heading_3": {"rich_text": [{"type": "text", "text": {"content": text[:2000]}}]}}
+
+
+def md_to_blocks(text):
+    """Convert Claude's Markdown summary into Notion blocks. The summary's own
+    '## ' section headers become H3 (they sit under the body's H2 'Summary'),
+    and '- '/'* '/'•' lines become bullets. Inline ** markers are stripped."""
+    blocks = []
+    for raw in (text or "").split("\n"):
+        line = raw.strip().replace("**", "")
+        if not line:
+            continue
+        m = re.match(r"^#{1,6}\s+(.*)$", line)
+        if m:
+            blocks.append(_heading3(m.group(1)))
+        elif re.match(r"^[-*•]\s+", line):
+            blocks.append(_bullet(re.sub(r"^[-*•]\s+", "", line)))
+        else:
+            blocks += [_paragraph(c) for c in _chunks(line)]
+    return blocks or [_paragraph("Summary not available.")]
+
+
+def strip_md(text):
+    """Plain-text version of the Markdown summary for the Summary property."""
+    out = []
+    for raw in (text or "").split("\n"):
+        line = re.sub(r"^\s*#{1,6}\s*", "", raw).replace("**", "")
+        line = re.sub(r"^\s*[-*•]\s+", "• ", line)
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 def _speaker_map(call):
     m = {}
     for p in call.get("participants", []):
@@ -241,43 +280,23 @@ def _speaker_map(call):
     return m
 
 
-def _turn_block(speaker, timestamp, text):
-    label = f"{speaker} ({timestamp}): " if timestamp else f"{speaker}: "
-    runs = [{"type": "text", "text": {"content": label[:2000]},
-             "annotations": {"bold": True}}]
-    runs += [{"type": "text", "text": {"content": c}} for c in _chunks(text)]
-    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": runs}}
+def _link_paragraph(label, url):
+    return {"object": "block", "type": "paragraph",
+            "paragraph": {"rich_text": [
+                {"type": "text", "text": {"content": label[:2000], "link": {"url": url}}}]}}
 
 
-def build_body_blocks(call):
+def build_body_blocks(call, summary_md):
     """The blocks written to the meeting body:
-        ## Action points
-        - <next step>
+        ▶ Open recording in Airspeed   (clickable link)
         ## Summary
-        <summary>
-        ## Transcript
-        **Speaker (mm:ss):** <turn text>
+        <Claude's structured summary — includes its own Next steps section>
     """
-    blocks = [_heading("Action points")]
-    steps = [i.get("value", "") for i in call.get("insights", [])
-             if i.get("name") == "next_steps" and i.get("value")]
-    if steps:
-        blocks += [_bullet(s) for s in steps]
-    else:
-        blocks.append(_paragraph("No action points captured."))
-
+    blocks = []
+    if call.get("url_link"):
+        blocks.append(_link_paragraph("▶ Open recording in Airspeed", call["url_link"]))
     blocks.append(_heading("Summary"))
-    blocks += [_paragraph(c) for c in _chunks(call.get("summary"))]
-
-    blocks.append(_heading("Transcript"))
-    turns = call.get("transcript_turns", [])
-    if turns:
-        smap = _speaker_map(call)
-        for t in turns:
-            spk = smap.get(t.get("party_id"), f"Speaker {t.get('party_id')}")
-            blocks.append(_turn_block(spk, t.get("timestamp", ""), t.get("turn_text", "")))
-    else:
-        blocks.append(_paragraph("Transcript not available."))
+    blocks += md_to_blocks(summary_md)
     return blocks
 
 
@@ -298,14 +317,68 @@ def call_emails_and_domains(call):
     return emails, domains
 
 
+# --------------------------------------------------------- CLAUDE SUMMARY ---
+
+def classify_meeting(call, domain_map):
+    """internal = all participants @dobby.io; customer_success = an external
+    participant whose domain matches a customer; sales = external, no match."""
+    _, domains = call_emails_and_domains(call)
+    external = domains - INTERNAL_DOMAINS
+    if not external:
+        return "internal"
+    if any(d in domain_map for d in external):
+        return "customer_success"
+    return "sales"
+
+
+def render_transcript_plain(call):
+    smap = _speaker_map(call)
+    lines = []
+    for t in call.get("transcript_turns", []):
+        spk = smap.get(t.get("party_id"), f"Speaker {t.get('party_id')}")
+        ts = t.get("timestamp", "")
+        label = f"{spk} ({ts}): " if ts else f"{spk}: "
+        lines.append(label + (t.get("turn_text", "") or ""))
+    return "\n".join(lines)
+
+
+def summarize(call, meeting_type):
+    """Ask Claude to summarize the transcript with the type-appropriate prompt.
+    Falls back to Airspeed's own summary if there is no transcript to work from."""
+    transcript = render_transcript_plain(call)
+    if not transcript.strip():
+        return call.get("summary") or ""
+    prompt = PROMPTS.get(meeting_type, PROMPTS["internal"])
+    content = (f"{prompt}\n\n{FORMAT_INSTRUCTION}\n\n"
+               f"Meeting title: {call.get('title', '')}\n\n"
+               f"<transcript>\n{transcript}\n</transcript>")
+    body = {"model": SUMMARY_MODEL, "max_tokens": 3000,
+            "messages": [{"role": "user", "content": content}]}
+    for attempt in range(5):
+        r = requests.post(ANTHROPIC_BASE,
+                          headers={"x-api-key": ANTHROPIC_API_KEY,
+                                   "anthropic-version": "2023-06-01",
+                                   "content-type": "application/json"},
+                          data=json.dumps(body), timeout=120)
+        if r.status_code == 429 or r.status_code >= 500:
+            time.sleep(float(r.headers.get("retry-after", 2 + attempt)))
+            continue
+        if r.status_code >= 400:
+            raise RuntimeError(f"Anthropic {r.status_code}: {r.text[:500]}")
+        data = r.json()
+        return "".join(b.get("text", "") for b in data.get("content", [])
+                       if b.get("type") == "text").strip()
+    raise RuntimeError("Anthropic request failed after retries")
+
+
 # --------------------------------------------------------------- CORE LOOP ---
 
-def completion_props(call):
-    """Properties written on both match and orphan. Summary stays in the
-    property too (the AI foundation queries it directly); the body carries the
-    human-readable copy. Action points live only in the body."""
+def completion_props(call, summary_md):
+    """Properties written on both match and orphan. The Summary property holds
+    a plain-text copy of Claude's summary (the AI foundation queries it
+    directly); the body carries the formatted copy."""
     props = {
-        P_SUMMARY: {"rich_text": _rt(call.get("summary"))},
+        P_SUMMARY: {"rich_text": _rt(strip_md(summary_md))},
         P_STATUS: {"select": {"name": "Completed"}},
         P_AIRSPEED_ID: {"rich_text": _rt(call["id"])},
     }
@@ -314,16 +387,16 @@ def completion_props(call):
     return props
 
 
-def update_record(page, call):
+def update_record(page, call, summary_md):
     # Set properties first — this claims the call via Airspeed Call ID, so a
     # retry after a mid-failure won't re-append duplicate body blocks — then
-    # append the Action points / Summary blocks to the body.
+    # append the Summary / Transcript blocks to the body.
     notion_request("PATCH", f"https://api.notion.com/v1/pages/{page['id']}",
-                   data=json.dumps({"properties": completion_props(call)}))
-    append_body(page["id"], build_body_blocks(call))
+                   data=json.dumps({"properties": completion_props(call, summary_md)}))
+    append_body(page["id"], build_body_blocks(call, summary_md))
 
 
-def create_orphan(call, domain_map):
+def create_orphan(call, domain_map, summary_md):
     emails, domains = call_emails_and_domains(call)
     external = domains - INTERNAL_DOMAINS
     matched = {domain_map[d] for d in external if d in domain_map}
@@ -332,7 +405,7 @@ def create_orphan(call, domain_map):
     start = parse_dt(call["start_time"])
     end = start + dt.timedelta(seconds=call.get("duration") or 0)
 
-    props = completion_props(call)
+    props = completion_props(call, summary_md)
     props[P_TITLE] = {"title": [{"type": "text",
                                  "text": {"content": (call.get("title") or "(no title)")[:2000]}}]}
     props[P_DATE] = {"date": {"start": start.isoformat(), "end": end.isoformat()}}
@@ -344,7 +417,7 @@ def create_orphan(call, domain_map):
     created = notion_request("POST", "https://api.notion.com/v1/pages",
                              data=json.dumps({"parent": {"database_id": MEETINGS_DB_ID},
                                               "properties": props}))
-    append_body(created["id"], build_body_blocks(call))
+    append_body(created["id"], build_body_blocks(call, summary_md))
 
 
 def best_match(call, candidates):
@@ -362,7 +435,6 @@ def best_match(call, candidates):
 
 
 def handle_call(call, domain_map, summary):
-    call_id = call["id"]
     status = call.get("status", {})
     status_code = status.get("code") if isinstance(status, dict) else status
     if status_code != "completed":
@@ -372,19 +444,22 @@ def handle_call(call, domain_map, summary):
         summary["skipped"] += 1
         return
 
+    meeting_type = classify_meeting(call, domain_map)
+    summary_md = summarize(call, meeting_type)
+
     candidates = candidate_records(parse_dt(call["start_time"]))
     match = best_match(call, candidates)
     if match:
-        update_record(match, call)
+        update_record(match, call, summary_md)
         summary["matched"] += 1
     else:
-        create_orphan(call, domain_map)
+        create_orphan(call, domain_map, summary_md)
         summary["orphans"] += 1
 
 
 def main():
-    if not NOTION_TOKEN or not GLYPHIC_API_KEY:
-        log("FATAL: NOTION_TOKEN and GLYPHIC_API_KEY must both be set")
+    if not (NOTION_TOKEN and GLYPHIC_API_KEY and ANTHROPIC_API_KEY):
+        log("FATAL: NOTION_TOKEN, GLYPHIC_API_KEY and ANTHROPIC_API_KEY must all be set")
         sys.exit(1)
 
     summary = {"matched": 0, "orphans": 0, "skipped": 0, "already": 0, "errors": 0}
