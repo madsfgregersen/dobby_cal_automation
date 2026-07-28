@@ -4,8 +4,9 @@ Meeting Sync — Step 1 of Dobby's automated meeting management.
 
 Reads every team member's Google Calendar a week ahead and creates/updates a
 matching record in the Notion "Meeting Notes DB", stamped with the Google
-Calendar event ID as the join key. It touches only machine-owned fields;
-human prep (the page body, Attendees, Area, Category, Project) is never altered.
+Calendar event ID as the join key. Attendees are resolved from participant
+emails to Notion workspace users. Human prep (the page body, Area, Category,
+Project) is never altered.
 
 Auth is keyless: Workload Identity Federation gets us the service account,
 domain-wide delegation lets that account read each user's calendar. No key files.
@@ -53,6 +54,7 @@ DEFAULT_CALENDAR_USERS = [
 P_TITLE = "Meeting name"
 P_DATE = "Date & Time"
 P_PARTICIPANTS = "Participants"
+P_ATTENDEES = "Attendees"
 P_EVENT_ID = "Calendar Event ID"
 P_STATUS = "Status"
 P_CUSTOMER = "Customer"
@@ -245,6 +247,42 @@ def load_customer_domain_map():
     return domain_map
 
 
+def load_notion_user_map():
+    """Build {email: user_id} for Notion workspace members. Requires the
+    integration's 'read user information including email addresses' capability;
+    without it emails come back absent and the map is simply empty (no match)."""
+    users = {}
+    url = "https://api.notion.com/v1/users"
+    start_cursor = None
+    while True:
+        params = {"page_size": 100}
+        if start_cursor:
+            params["start_cursor"] = start_cursor
+        data = notion_request("GET", url, params=params)
+        for u in data.get("results", []):
+            if u.get("type") == "person":
+                email = (u.get("person") or {}).get("email")
+                if email:
+                    users[email.lower()] = u["id"]
+        if not data.get("has_more"):
+            break
+        start_cursor = data.get("next_cursor")
+    log(f"loaded {len(users)} Notion users with emails")
+    return users
+
+
+def resolve_attendees(emails, user_map):
+    """Map participant emails to Notion user references (internal folks only —
+    external customers aren't workspace users, so they simply don't match)."""
+    people, seen = [], set()
+    for e in emails:
+        uid = user_map.get(e.lower())
+        if uid and uid not in seen:
+            seen.add(uid)
+            people.append({"id": uid})
+    return people
+
+
 def find_meeting_by_event_id(event_id):
     url = f"https://api.notion.com/v1/databases/{MEETINGS_DB_ID}/query"
     payload = {
@@ -260,14 +298,17 @@ def _rich_text(value):
     return [{"type": "text", "text": {"content": value[:2000]}}] if value else []
 
 
-def create_meeting(event_id, title, start, end, participants, customer_id):
+def create_meeting(event_id, title, start, end, emails, customer_id, user_map):
     props = {
         P_TITLE: {"title": [{"type": "text", "text": {"content": title[:2000]}}]},
         P_DATE: {"date": {"start": start, "end": end}},
-        P_PARTICIPANTS: {"rich_text": _rich_text(participants)},
+        P_PARTICIPANTS: {"rich_text": _rich_text("; ".join(sorted(emails)))},
         P_EVENT_ID: {"rich_text": _rich_text(event_id)},
         P_STATUS: {"select": {"name": "Planned"}},
     }
+    people = resolve_attendees(emails, user_map)
+    if people:
+        props[P_ATTENDEES] = {"people": people}
     if customer_id:
         props[P_CUSTOMER] = {"relation": [{"id": customer_id}]}
         props[P_AREA] = {"select": {"name": CUSTOMER_AREA}}
@@ -279,15 +320,19 @@ def create_meeting(event_id, title, start, end, participants, customer_id):
     )
 
 
-def update_meeting(page, title, start, end, participants, customer_id):
+def update_meeting(page, title, start, end, emails, customer_id, user_map):
     """Update machine-owned fields only. Never touch Status. Fill
-    Customer/Area/Category only when currently empty (protects human edits)."""
+    Customer/Area/Category/Attendees only when currently empty (protects edits)."""
     props = {
         P_TITLE: {"title": [{"type": "text", "text": {"content": title[:2000]}}]},
         P_DATE: {"date": {"start": start, "end": end}},
-        P_PARTICIPANTS: {"rich_text": _rich_text(participants)},
+        P_PARTICIPANTS: {"rich_text": _rich_text("; ".join(sorted(emails)))},
     }
     ex = page.get("properties", {})
+    if not ex.get(P_ATTENDEES, {}).get("people", []):
+        people = resolve_attendees(emails, user_map)
+        if people:
+            props[P_ATTENDEES] = {"people": people}
     if customer_id:
         if not ex.get(P_CUSTOMER, {}).get("relation", []):
             props[P_CUSTOMER] = {"relation": [{"id": customer_id}]}
@@ -312,7 +357,7 @@ def mark_cancelled(page):
 
 # --------------------------------------------------------------- CORE LOOP ---
 
-def handle_event(ev, domain_map, summary):
+def handle_event(ev, domain_map, user_map, summary):
     event_id = ev.get("id")
     if not event_id:
         summary["skipped"] += 1
@@ -350,13 +395,12 @@ def handle_event(ev, domain_map, summary):
     title = ev.get("summary") or "(no title)"
     start = ev["start"].get("dateTime") or ev["start"].get("date")
     end = ev["end"].get("dateTime") or ev["end"].get("date")
-    participants = "; ".join(sorted(emails))
 
     if existing:
-        update_meeting(existing, title, start, end, participants, customer_id)
+        update_meeting(existing, title, start, end, emails, customer_id, user_map)
         summary["updated"] += 1
     else:
-        create_meeting(event_id, title, start, end, participants, customer_id)
+        create_meeting(event_id, title, start, end, emails, customer_id, user_map)
         summary["created"] += 1
 
 
@@ -375,6 +419,7 @@ def main():
 
     adc = google_adc_token()
     domain_map = load_customer_domain_map()
+    user_map = load_notion_user_map()
     users = get_calendar_users()
     time_min, time_max = window_bounds()
     log(f"syncing {len(users)} calendars, window {time_min} .. {time_max}")
@@ -400,7 +445,7 @@ def main():
 
     for ev in events_by_id.values():
         try:
-            handle_event(ev, domain_map, summary)
+            handle_event(ev, domain_map, user_map, summary)
         except Exception as e:
             log(f"ERROR on event {ev.get('id')}: {e}")
             summary["errors"] += 1
