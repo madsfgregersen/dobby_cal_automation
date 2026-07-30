@@ -222,7 +222,11 @@ def parse_dt(s):
 
 
 def _rt(value):
-    return [{"type": "text", "text": {"content": (value or "")[:2000]}}] if value else []
+    """Rich-text value split into <=1900-char items so no single run exceeds
+    Notion's 2000-char limit — and nothing is lost to truncation."""
+    value = value or ""
+    return [{"type": "text", "text": {"content": value[i:i + 1900]}}
+            for i in range(0, len(value), 1900)]
 
 
 def _chunks(text, size=1900):
