@@ -365,17 +365,16 @@ def render_transcript_plain(call):
     return "\n".join(lines)
 
 
-def summarize(call, meeting_type):
-    """Ask Claude to summarize the transcript with the type-appropriate prompt.
-    Falls back to Airspeed's own summary if there is no transcript to work from."""
-    transcript = render_transcript_plain(call)
-    if not transcript.strip():
-        return call.get("summary") or ""
-    prompt = PROMPTS.get(meeting_type, PROMPTS["internal"])
-    content = (f"{prompt}\n\n{FORMAT_INSTRUCTION}\n\n"
-               f"Meeting title: {call.get('title', '')}\n\n"
-               f"<transcript>\n{transcript}\n</transcript>")
-    body = {"model": SUMMARY_MODEL, "max_tokens": 3000,
+SUMMARY_MAX_TOKENS = 4096       # generous headroom for a full multi-section summary
+SUMMARY_MAX_TOKENS_CAP = 8192   # ceiling when growing the budget after a cut-off
+SUMMARY_ATTEMPTS = 3            # full re-tries when a reply comes back incomplete
+
+
+def _claude_call(content, max_tokens):
+    """One Claude request. Returns (text, stop_reason). Retries only transient
+    HTTP failures (429 / 5xx); higher-level completeness retries live in
+    summarize()."""
+    body = {"model": SUMMARY_MODEL, "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": content}]}
     for attempt in range(5):
         r = requests.post(ANTHROPIC_BASE,
@@ -389,9 +388,62 @@ def summarize(call, meeting_type):
         if r.status_code >= 400:
             raise RuntimeError(f"Anthropic {r.status_code}: {r.text[:500]}")
         data = r.json()
-        return "".join(b.get("text", "") for b in data.get("content", [])
+        text = "".join(b.get("text", "") for b in data.get("content", [])
                        if b.get("type") == "text").strip()
+        return text, data.get("stop_reason")
     raise RuntimeError("Anthropic request failed after retries")
+
+
+def _summary_incomplete(text, transcript, stop_reason):
+    """True when a reply looks truncated rather than a genuinely short summary.
+    Guards against silently saving half a summary and marking the meeting
+    Completed, which idempotency would then make permanent.
+
+    Uses only low-false-positive signals, because a persistent failure makes us
+    raise (leaving the meeting to regenerate next run) and we must not reject
+    valid summaries. Note punctuation is NOT a signal: many summaries end on a
+    checkbox line with no full stop, so 'ends mid-sentence' would fire on good
+    output. The reliable signals are:
+      * an empty reply
+      * a reply cut off by the token budget (stop_reason == 'max_tokens')
+      * a reply far too short for a substantial transcript — the observed
+        failure mode, where a long meeting collapsed to a couple of lines"""
+    if not text:
+        return True
+    if stop_reason == "max_tokens":
+        return True
+    return len(transcript) > 6000 and len(text) < 500
+
+
+def summarize(call, meeting_type):
+    """Ask Claude to summarize the transcript with the type-appropriate prompt.
+    Falls back to Airspeed's own summary if there is no transcript to work from.
+
+    Retries when a reply comes back incomplete (empty, cut off by the token
+    budget, or far too short for the transcript). If every attempt still looks
+    truncated we raise, so handle_call leaves the meeting un-ingested and a
+    later run regenerates it — better than baking in a partial summary."""
+    transcript = render_transcript_plain(call)
+    if not transcript.strip():
+        return call.get("summary") or ""
+    prompt = PROMPTS.get(meeting_type, PROMPTS["internal"])
+    content = (f"{prompt}\n\n{FORMAT_INSTRUCTION}\n\n"
+               f"Meeting title: {call.get('title', '')}\n\n"
+               f"<transcript>\n{transcript}\n</transcript>")
+
+    max_tokens = SUMMARY_MAX_TOKENS
+    best = ""
+    for attempt in range(SUMMARY_ATTEMPTS):
+        text, stop_reason = _claude_call(content, max_tokens)
+        if not _summary_incomplete(text, transcript, stop_reason):
+            return text
+        best = text or best
+        if stop_reason == "max_tokens":     # genuinely out of room — grow the budget
+            max_tokens = min(max_tokens * 2, SUMMARY_MAX_TOKENS_CAP)
+        log(f"summary for call {call.get('id')} looked incomplete "
+            f"(len={len(text)}, stop={stop_reason}); retry {attempt + 1}/{SUMMARY_ATTEMPTS}")
+    raise RuntimeError(
+        f"summary still incomplete after {SUMMARY_ATTEMPTS} attempts (len={len(best)})")
 
 
 # --------------------------------------------------------------- CORE LOOP ---
