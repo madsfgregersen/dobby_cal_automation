@@ -30,6 +30,8 @@ import requests
 import google.auth
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
+import directory_users
+
 # ----------------------------------------------------------------- CONFIG ---
 
 SERVICE_ACCOUNT_EMAIL = "meeting-sync@dobby-workspace-automations.iam.gserviceaccount.com"
@@ -235,7 +237,13 @@ def qualifies(ev, user_email):
     return True
 
 
-def get_target_users():
+def get_target_users(adc_token):
+    """USER_SOURCE=directory discovers all active users live (whole company);
+    otherwise use the manual ATTENDEE_SYNC_USERS / CALENDAR_USERS list."""
+    if os.environ.get("USER_SOURCE", "list").strip().lower() == "directory":
+        users = directory_users.list_active_users(adc_token)
+        log(f"discovered {len(users)} active users via Directory API")
+        return users
     raw = os.environ.get("ATTENDEE_SYNC_USERS") or os.environ.get("CALENDAR_USERS", "")
     users = [u.strip() for u in raw.split(",") if u.strip()]
     return users or DEFAULT_CALENDAR_USERS
@@ -243,7 +251,7 @@ def get_target_users():
 
 def main():
     adc = google_adc_token()
-    users = get_target_users()
+    users = get_target_users(adc)
     time_min, time_max = window_bounds()
     log(f"attendee sync {'(DRY-RUN)' if DRY_RUN else '(LIVE)'} — "
         f"{len(users)} calendars, window {time_min} .. {time_max}, recorder {RECORDER_EMAIL}")

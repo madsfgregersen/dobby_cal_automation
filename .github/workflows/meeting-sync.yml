@@ -34,5 +34,12 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           CALENDAR_USERS: ${{ vars.CALENDAR_USERS }}
+          # Set USER_SOURCE=directory to cover ALL active Workspace users (needs
+          # the admin.directory.user.readonly DWD scope). Unset = manual list.
+          USER_SOURCE: ${{ vars.USER_SOURCE }}
+          DIRECTORY_ADMIN: ${{ vars.DIRECTORY_ADMIN }}
+          USER_EXCLUDE: ${{ vars.USER_EXCLUDE }}
+          # Preview without writing to Notion. Defaults off (live).
+          DRY_RUN: ${{ vars.MEETING_SYNC_DRY_RUN || 'false' }}
         run: python sync.py
  

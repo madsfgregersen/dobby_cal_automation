@@ -27,6 +27,8 @@ import requests
 import google.auth
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
+import directory_users
+
 # ----------------------------------------------------------------- CONFIG ---
 
 SERVICE_ACCOUNT_EMAIL = "meeting-sync@dobby-workspace-automations.iam.gserviceaccount.com"
@@ -72,6 +74,12 @@ MIN_PARTICIPANTS = 2
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+
+# Preview mode — logs would-be Notion writes without making them. Only an
+# explicit true/1/yes enables it, so a missing or empty env keeps writes ON and
+# can't accidentally silence the live sync. Use it to preview before turning on
+# company-wide discovery.
+DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("true", "1", "yes")
 
 # --------------------------------------------------------------- LOGGING ----
 
@@ -299,6 +307,9 @@ def _rich_text(value):
 
 
 def create_meeting(event_id, title, start, end, emails, customer_id, user_map):
+    if DRY_RUN:
+        log(f"[DRY-RUN] would create '{title}' @ {start} ({event_id})")
+        return
     props = {
         P_TITLE: {"title": [{"type": "text", "text": {"content": title[:2000]}}]},
         P_DATE: {"date": {"start": start, "end": end}},
@@ -323,6 +334,9 @@ def create_meeting(event_id, title, start, end, emails, customer_id, user_map):
 def update_meeting(page, title, start, end, emails, customer_id, user_map):
     """Update machine-owned fields only. Never touch Status. Fill
     Customer/Area/Category/Attendees only when currently empty (protects edits)."""
+    if DRY_RUN:
+        log(f"[DRY-RUN] would update '{title}' @ {start} (page {page['id']})")
+        return
     props = {
         P_TITLE: {"title": [{"type": "text", "text": {"content": title[:2000]}}]},
         P_DATE: {"date": {"start": start, "end": end}},
@@ -348,6 +362,9 @@ def update_meeting(page, title, start, end, emails, customer_id, user_map):
 
 
 def mark_cancelled(page):
+    if DRY_RUN:
+        log(f"[DRY-RUN] would mark cancelled (page {page['id']})")
+        return
     notion_request(
         "PATCH",
         f"https://api.notion.com/v1/pages/{page['id']}",
@@ -404,7 +421,13 @@ def handle_event(ev, domain_map, user_map, summary):
         summary["created"] += 1
 
 
-def get_calendar_users():
+def get_calendar_users(adc_token):
+    """USER_SOURCE=directory discovers all active users live (whole company);
+    otherwise use the manual CALENDAR_USERS list."""
+    if os.environ.get("USER_SOURCE", "list").strip().lower() == "directory":
+        users = directory_users.list_active_users(adc_token)
+        log(f"discovered {len(users)} active users via Directory API")
+        return users
     raw = os.environ.get("CALENDAR_USERS", "")
     users = [u.strip() for u in raw.split(",") if u.strip()]
     return users or DEFAULT_CALENDAR_USERS
@@ -420,9 +443,10 @@ def main():
     adc = google_adc_token()
     domain_map = load_customer_domain_map()
     user_map = load_notion_user_map()
-    users = get_calendar_users()
+    users = get_calendar_users(adc)
     time_min, time_max = window_bounds()
-    log(f"syncing {len(users)} calendars, window {time_min} .. {time_max}")
+    log(f"syncing {len(users)} calendars{' (DRY-RUN)' if DRY_RUN else ''}, "
+        f"window {time_min} .. {time_max}")
 
     # Collect across all users, deduped by event id (invited events share an id
     # across attendees' calendars, so this avoids redundant writes).

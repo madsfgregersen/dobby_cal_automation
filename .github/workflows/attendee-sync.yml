@@ -35,6 +35,11 @@ jobs:
           CALENDAR_USERS: ${{ vars.CALENDAR_USERS }}
           # Optional pilot override — a comma-separated subset. Unset = use CALENDAR_USERS.
           ATTENDEE_SYNC_USERS: ${{ vars.ATTENDEE_SYNC_USERS }}
+          # Set USER_SOURCE=directory to cover ALL active Workspace users (needs
+          # the admin.directory.user.readonly DWD scope). Overrides the lists above.
+          USER_SOURCE: ${{ vars.USER_SOURCE }}
+          DIRECTORY_ADMIN: ${{ vars.DIRECTORY_ADMIN }}
+          USER_EXCLUDE: ${{ vars.USER_EXCLUDE }}
           # Safety: stays in dry-run (writes nothing) unless you set the repo
           # variable ATTENDEE_SYNC_DRY_RUN to "false".
           DRY_RUN: ${{ vars.ATTENDEE_SYNC_DRY_RUN || 'true' }}
