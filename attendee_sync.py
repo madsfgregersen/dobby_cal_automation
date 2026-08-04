@@ -224,6 +224,8 @@ def qualifies(ev, user_email):
       * the recorder isn't already on it."""
     if ev.get("status") == "cancelled":
         return False
+    if ev.get("visibility") in ("private", "confidential"):
+        return False        # respect events the organizer marked Private
     organizer = ev.get("organizer") or {}
     if not (organizer.get("self") or organizer.get("email", "").lower() == user_email.lower()):
         return False

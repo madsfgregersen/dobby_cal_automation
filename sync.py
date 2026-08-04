@@ -380,6 +380,12 @@ def handle_event(ev, domain_map, user_map, summary):
         summary["skipped"] += 1
         return
 
+    # Respect events the organizer marked Private/Confidential — don't surface
+    # them in the shared Notion DB.
+    if ev.get("visibility") in ("private", "confidential"):
+        summary["skipped"] += 1
+        return
+
     existing = find_meeting_by_event_id(event_id)
 
     # Cancellations: mark, never delete. Skip if we never had a record.
