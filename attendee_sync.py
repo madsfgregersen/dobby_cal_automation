@@ -239,14 +239,21 @@ def qualifies(ev, user_email):
 
 def get_target_users(adc_token):
     """USER_SOURCE=directory discovers all active users live (whole company);
-    otherwise use the manual ATTENDEE_SYNC_USERS / CALENDAR_USERS list."""
-    if os.environ.get("USER_SOURCE", "list").strip().lower() == "directory":
-        users = directory_users.list_active_users(adc_token)
-        log(f"discovered {len(users)} active users via Directory API")
-        return users
+    otherwise use the manual ATTENDEE_SYNC_USERS / CALENDAR_USERS list. If
+    discovery fails (e.g. the Directory scope hasn't propagated), fall back to
+    the manual list with a warning rather than taking the whole run down."""
     raw = os.environ.get("ATTENDEE_SYNC_USERS") or os.environ.get("CALENDAR_USERS", "")
-    users = [u.strip() for u in raw.split(",") if u.strip()]
-    return users or DEFAULT_CALENDAR_USERS
+    manual = [u.strip() for u in raw.split(",") if u.strip()] or DEFAULT_CALENDAR_USERS
+    if os.environ.get("USER_SOURCE", "list").strip().lower() == "directory":
+        try:
+            users = directory_users.list_active_users(adc_token)
+            log(f"discovered {len(users)} active users via Directory API")
+            return users
+        except Exception as e:
+            log(f"WARNING: Directory discovery failed ({e}); "
+                f"falling back to manual list of {len(manual)} users")
+            return manual
+    return manual
 
 
 def main():

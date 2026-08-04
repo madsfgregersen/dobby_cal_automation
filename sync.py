@@ -423,14 +423,21 @@ def handle_event(ev, domain_map, user_map, summary):
 
 def get_calendar_users(adc_token):
     """USER_SOURCE=directory discovers all active users live (whole company);
-    otherwise use the manual CALENDAR_USERS list."""
+    otherwise use the manual CALENDAR_USERS list. If discovery fails (e.g. the
+    Directory scope hasn't propagated), fall back to the manual list with a
+    warning rather than taking the whole run down."""
+    manual = [u.strip() for u in os.environ.get("CALENDAR_USERS", "").split(",") if u.strip()]
+    manual = manual or DEFAULT_CALENDAR_USERS
     if os.environ.get("USER_SOURCE", "list").strip().lower() == "directory":
-        users = directory_users.list_active_users(adc_token)
-        log(f"discovered {len(users)} active users via Directory API")
-        return users
-    raw = os.environ.get("CALENDAR_USERS", "")
-    users = [u.strip() for u in raw.split(",") if u.strip()]
-    return users or DEFAULT_CALENDAR_USERS
+        try:
+            users = directory_users.list_active_users(adc_token)
+            log(f"discovered {len(users)} active users via Directory API")
+            return users
+        except Exception as e:
+            log(f"WARNING: Directory discovery failed ({e}); "
+                f"falling back to manual list of {len(manual)} users")
+            return manual
+    return manual
 
 
 def main():
