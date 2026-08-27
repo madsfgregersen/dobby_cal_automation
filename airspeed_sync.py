@@ -437,13 +437,22 @@ def summarize(call, meeting_type):
         text, stop_reason = _claude_call(content, max_tokens)
         if not _summary_incomplete(text, transcript, stop_reason):
             return text
-        best = text or best
+        if len(text) > len(best):
+            best = text
         if stop_reason == "max_tokens":     # genuinely out of room — grow the budget
             max_tokens = min(max_tokens * 2, SUMMARY_MAX_TOKENS_CAP)
         log(f"summary for call {call.get('id')} looked incomplete "
             f"(len={len(text)}, stop={stop_reason}); retry {attempt + 1}/{SUMMARY_ATTEMPTS}")
-    raise RuntimeError(
-        f"summary still incomplete after {SUMMARY_ATTEMPTS} attempts (len={len(best)})")
+
+    # Every attempt still looked incomplete. Don't fail the run — a genuinely
+    # short summary (e.g. a training/demo with little to record) would then be
+    # retried forever and the meeting never ingested. Keep the best we got, or
+    # Airspeed's own summary as a fallback, and move on. The retries above still
+    # recover the real failure mode this guard was added for (a transient,
+    # mid-sentence API cut-off, which a re-request fixes).
+    log(f"summary for call {call.get('id')} still looked short after "
+        f"{SUMMARY_ATTEMPTS} attempts (len={len(best)}); keeping best available")
+    return best or call.get("summary") or ""
 
 
 # --------------------------------------------------------------- CORE LOOP ---
