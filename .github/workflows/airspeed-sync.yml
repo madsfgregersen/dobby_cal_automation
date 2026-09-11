@@ -1,16 +1,14 @@
 name: Airspeed Sync
 
 on:
-  schedule:
-    # Fires every 15 min across 06:00–20:59 UTC — a superset that covers the
-    # 08:00–22:00 CET daytime window in both winter (UTC+1) and summer (UTC+2).
-    # airspeed_sync.py then gates precisely on local CET time and weekday/weekend.
-    - cron: "*/15 6-20 * * *"
+  # Started by Google Cloud Scheduler (every 30 min) via a workflow_dispatch API
+  # call — GitHub's own cron is throttled and clusters runs 1–2h apart, so we
+  # don't rely on it. Also runnable manually from the Actions tab.
   workflow_dispatch: {}
 
-# GitHub throttles scheduled runs, so the job loops internally (see the run step)
-# instead of relying on the cron to fire every few minutes. This guard lets a
-# fresh scheduled start replace an in-progress loop rather than pile up behind it.
+# Safety guard: if a run ever overruns into the next trigger, replace it rather
+# than pile up. Normally each run self-exits (see the deadline in the run step)
+# before the next trigger, so this rarely fires.
 concurrency:
   group: airspeed-sync
   cancel-in-progress: true
@@ -38,12 +36,13 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          # Poll every 90s for up to ~2.75h, then exit. One long run with a tight
-          # internal loop keeps latency low; an external trigger (Google Cloud
-          # Scheduler -> workflow_dispatch) starts a fresh run reliably, since
-          # GitHub throttles the cron above. airspeed_sync.py still gates itself
-          # to CET work hours, so iterations outside the window exit immediately.
-          deadline=$(( SECONDS + 10200 ))   # ~170 minutes, safely under the 6h job cap
+          # Poll Airspeed every 90s, then exit cleanly. The deadline is sized to
+          # finish just before the next Cloud Scheduler trigger (every 30 min),
+          # so each run ends green instead of being cancelled mid-loop. If you
+          # change the Cloud Scheduler interval, adjust this to match.
+          # airspeed_sync.py gates itself to CET work hours, so iterations
+          # outside the window exit immediately.
+          deadline=$(( SECONDS + 1680 ))    # ~28 minutes (< the 30-min trigger interval)
           while true; do
             python airspeed_sync.py || true
             if [ "$SECONDS" -ge "$deadline" ]; then break; fi
