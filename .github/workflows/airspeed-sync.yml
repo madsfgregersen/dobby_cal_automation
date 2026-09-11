@@ -31,20 +31,21 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Airspeed sync (loops every 5 min through the working window)
+      - name: Run Airspeed sync (loops every 90s through the working window)
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           GLYPHIC_API_KEY: ${{ secrets.GLYPHIC_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          # Work every 5 min for up to ~2.75h, then exit. One long run with an
-          # internal loop gives a reliable cadence despite GitHub throttling
-          # scheduled starts. airspeed_sync.py still gates itself to CET work
-          # hours, so iterations outside the window exit immediately.
+          # Poll every 90s for up to ~2.75h, then exit. One long run with a tight
+          # internal loop keeps latency low; an external trigger (Google Cloud
+          # Scheduler -> workflow_dispatch) starts a fresh run reliably, since
+          # GitHub throttles the cron above. airspeed_sync.py still gates itself
+          # to CET work hours, so iterations outside the window exit immediately.
           deadline=$(( SECONDS + 10200 ))   # ~170 minutes, safely under the 6h job cap
           while true; do
             python airspeed_sync.py || true
             if [ "$SECONDS" -ge "$deadline" ]; then break; fi
-            sleep 300
+            sleep 90
           done
