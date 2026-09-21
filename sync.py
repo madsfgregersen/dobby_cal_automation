@@ -65,9 +65,26 @@ P_CATEGORY = "Category"
 P_CUST_NAME = "Name"
 P_CUST_EMAIL = "Email"
 
-# Applied to a meeting when it matches a customer.
+# Applied to a meeting when it matches a customer (and no title rule below fires).
 CUSTOMER_AREA = "Customer Success"       # exact option name in the Area select
 CUSTOMER_CATEGORY = ["Customer call"]    # exact option name in the Category multi-select
+
+# Title-based labelling — how INTERNAL meetings (and any others) get an Area and
+# Category even when they don't match a customer. Each rule is
+#   (substring, Area, [Category, ...])
+# The substring is matched case-insensitively anywhere in the meeting title and
+# the FIRST matching rule wins. Names must exactly match existing Notion options
+# (Area select; Category multi-select options include: Standup, Customer call,
+# Planning, Training, Technical, Presentation, Other). Edit this table freely —
+# no other code change is needed. A meeting that matches NO rule but DOES match a
+# customer falls back to CUSTOMER_AREA / CUSTOMER_CATEGORY above.
+TITLE_LABEL_RULES = [
+    ("cs team weekly", "Customer Success", ["Standup"]),
+    ("cs weekly",      "Customer Success", ["Standup"]),   # e.g. "CS weekly planning and prioritisation"
+    # Add more here, e.g.:
+    # ("cph team weekly", "<Area option>", ["Standup"]),
+    # ("sales / marketing sync", "<Area option>", ["Standup"]),
+]
 
 # A meeting with fewer than this many participants is skipped.
 MIN_PARTICIPANTS = 2
@@ -306,7 +323,21 @@ def _rich_text(value):
     return [{"type": "text", "text": {"content": value[:2000]}}] if value else []
 
 
-def create_meeting(event_id, title, start, end, emails, customer_id, user_map):
+def labels_for(title, customer_id):
+    """Decide (Area, [Category]) for a meeting. A title rule wins — so internal
+    meetings (standups, planning, ...) get labelled even without a customer —
+    otherwise a customer-matched meeting falls back to the customer defaults;
+    otherwise no labels. Returns (area_or_None, category_list_or_None)."""
+    t = (title or "").lower()
+    for needle, area, category in TITLE_LABEL_RULES:
+        if needle in t:
+            return area, list(category)
+    if customer_id:
+        return CUSTOMER_AREA, list(CUSTOMER_CATEGORY)
+    return None, None
+
+
+def create_meeting(event_id, title, start, end, emails, customer_id, area, category, user_map):
     if DRY_RUN:
         log(f"[DRY-RUN] would create '{title}' @ {start} ({event_id})")
         return
@@ -322,8 +353,10 @@ def create_meeting(event_id, title, start, end, emails, customer_id, user_map):
         props[P_ATTENDEES] = {"people": people}
     if customer_id:
         props[P_CUSTOMER] = {"relation": [{"id": customer_id}]}
-        props[P_AREA] = {"select": {"name": CUSTOMER_AREA}}
-        props[P_CATEGORY] = {"multi_select": [{"name": c} for c in CUSTOMER_CATEGORY]}
+    if area:
+        props[P_AREA] = {"select": {"name": area}}
+    if category:
+        props[P_CATEGORY] = {"multi_select": [{"name": c} for c in category]}
     notion_request(
         "POST",
         "https://api.notion.com/v1/pages",
@@ -331,9 +364,11 @@ def create_meeting(event_id, title, start, end, emails, customer_id, user_map):
     )
 
 
-def update_meeting(page, title, start, end, emails, customer_id, user_map):
+def update_meeting(page, title, start, end, emails, customer_id, area, category, user_map):
     """Update machine-owned fields only. Never touch Status. Fill
-    Customer/Area/Category/Attendees only when currently empty (protects edits)."""
+    Customer/Area/Category/Attendees only when currently empty (protects edits).
+    Because it's fill-if-empty, an existing record that's missing Area/Category
+    gets labelled on the next sync once a rule (or customer match) applies."""
     if DRY_RUN:
         log(f"[DRY-RUN] would update '{title}' @ {start} (page {page['id']})")
         return
@@ -347,13 +382,12 @@ def update_meeting(page, title, start, end, emails, customer_id, user_map):
         people = resolve_attendees(emails, user_map)
         if people:
             props[P_ATTENDEES] = {"people": people}
-    if customer_id:
-        if not ex.get(P_CUSTOMER, {}).get("relation", []):
-            props[P_CUSTOMER] = {"relation": [{"id": customer_id}]}
-        if not ex.get(P_AREA, {}).get("select"):
-            props[P_AREA] = {"select": {"name": CUSTOMER_AREA}}
-        if not ex.get(P_CATEGORY, {}).get("multi_select", []):
-            props[P_CATEGORY] = {"multi_select": [{"name": c} for c in CUSTOMER_CATEGORY]}
+    if customer_id and not ex.get(P_CUSTOMER, {}).get("relation", []):
+        props[P_CUSTOMER] = {"relation": [{"id": customer_id}]}
+    if area and not ex.get(P_AREA, {}).get("select"):
+        props[P_AREA] = {"select": {"name": area}}
+    if category and not ex.get(P_CATEGORY, {}).get("multi_select", []):
+        props[P_CATEGORY] = {"multi_select": [{"name": c} for c in category]}
     notion_request(
         "PATCH",
         f"https://api.notion.com/v1/pages/{page['id']}",
@@ -418,12 +452,13 @@ def handle_event(ev, domain_map, user_map, summary):
     title = ev.get("summary") or "(no title)"
     start = ev["start"].get("dateTime") or ev["start"].get("date")
     end = ev["end"].get("dateTime") or ev["end"].get("date")
+    area, category = labels_for(title, customer_id)
 
     if existing:
-        update_meeting(existing, title, start, end, emails, customer_id, user_map)
+        update_meeting(existing, title, start, end, emails, customer_id, area, category, user_map)
         summary["updated"] += 1
     else:
-        create_meeting(event_id, title, start, end, emails, customer_id, user_map)
+        create_meeting(event_id, title, start, end, emails, customer_id, area, category, user_map)
         summary["created"] += 1
 
 
