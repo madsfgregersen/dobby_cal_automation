@@ -505,14 +505,21 @@ def create_orphan(call, domain_map, summary_md):
 
 
 def best_match(call, candidates):
-    """Score candidates by shared participants/domain; require a positive
-    signal so we never mis-file onto a same-slot but unrelated meeting."""
+    """Score candidates by shared participant emails and shared EXTERNAL domains
+    only. A shared internal domain (e.g. dobby.io) is deliberately NOT a positive
+    signal on its own: when external guests join with no e-mail (so the call's
+    only identifiable participant is an internal organizer), a domain-level match
+    would cross-file the call onto any unrelated meeting in the same slot that
+    happens to include a colleague. Requiring a shared e-mail or a shared external
+    (customer) domain means an ambiguous call becomes its own orphan record
+    instead of polluting an unrelated meeting."""
     call_emails, call_domains = call_emails_and_domains(call)
+    call_ext_domains = call_domains - INTERNAL_DOMAINS
     best, best_score = None, 0
     for page in candidates:
         rec_emails = record_participant_emails(page)
-        rec_domains = {e.split("@")[-1] for e in rec_emails}
-        score = 10 * len(call_emails & rec_emails) + len(call_domains & rec_domains)
+        rec_ext_domains = {e.split("@")[-1] for e in rec_emails} - INTERNAL_DOMAINS
+        score = 10 * len(call_emails & rec_emails) + len(call_ext_domains & rec_ext_domains)
         if score > best_score:
             best, best_score = page, score
     return best if best_score > 0 else None
