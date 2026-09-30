@@ -29,13 +29,19 @@ from prompts import PROMPTS, FORMAT_INSTRUCTION
 
 GLYPHIC_BASE = "https://api.glyphic.ai/v1"
 ANTHROPIC_BASE = "https://api.anthropic.com/v1/messages"
-SUMMARY_MODEL = "claude-sonnet-5"
+# Haiku 4.5 — summarization is well within its range and it costs ~half of
+# Sonnet per token (and runs no thinking by default), which is the main
+# Anthropic-cost lever for this flow. Bump back to a Sonnet/Opus id if summary
+# quality regresses.
+SUMMARY_MODEL = "claude-haiku-4-5"
 
 MEETINGS_DB_ID = "280db974-b757-8050-b523-c091e4c3ffd3"    # Meeting Notes DB
 CUSTOMERS_DB_ID = "280db974-b757-80f3-a1a0-db38f8c584d4"   # Customer Database
 
 INTERNAL_DOMAINS = {"dobby.io"}
 LOOKBACK_DAYS = 3               # how far back to scan Airspeed for new calls
+MIN_CALL_SECONDS = 180          # skip calls shorter than 3 min (no-shows / quick
+                               # check-ins) — not worth a summary, saves API cost
 MATCH_TOLERANCE_MIN = 90        # start-time window for matching to a record
                                # (wide enough to catch short-notice reschedules;
                                # safe since best_match requires a shared e-mail or
@@ -77,6 +83,10 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 # --------------------------------------------------------------- LOGGING ----
 
 _log_lines = []
+
+# Anthropic token usage accumulated across this run, for cost visibility
+# (logged per call and totalled in the final `done:` line).
+_usage_totals = {"input_tokens": 0, "output_tokens": 0}
 
 
 def log(msg):
@@ -391,6 +401,11 @@ def _claude_call(content, max_tokens):
         if r.status_code >= 400:
             raise RuntimeError(f"Anthropic {r.status_code}: {r.text[:500]}")
         data = r.json()
+        usage = data.get("usage") or {}
+        in_tok, out_tok = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+        _usage_totals["input_tokens"] += in_tok
+        _usage_totals["output_tokens"] += out_tok
+        log(f"claude usage ({SUMMARY_MODEL}): input={in_tok} output={out_tok}")
         text = "".join(b.get("text", "") for b in data.get("content", [])
                        if b.get("type") == "text").strip()
         return text, data.get("stop_reason")
@@ -537,6 +552,11 @@ def handle_call(call, domain_map, summary):
     if not call.get("start_time"):
         summary["skipped"] += 1
         return
+    if (call.get("duration") or 0) < MIN_CALL_SECONDS:
+        log(f"skipping short call {call.get('id')} "
+            f"({call.get('duration') or 0}s < {MIN_CALL_SECONDS}s)")
+        summary["skipped_short"] += 1
+        return
 
     meeting_type = classify_meeting(call, domain_map)
     summary_md = summarize(call, meeting_type)
@@ -571,7 +591,8 @@ def main():
         log("FATAL: NOTION_TOKEN, GLYPHIC_API_KEY and ANTHROPIC_API_KEY must all be set")
         sys.exit(1)
 
-    summary = {"matched": 0, "orphans": 0, "skipped": 0, "already": 0, "errors": 0}
+    summary = {"matched": 0, "orphans": 0, "skipped": 0, "skipped_short": 0,
+               "already": 0, "errors": 0}
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=LOOKBACK_DAYS)
 
     domain_map = load_customer_domain_map()
@@ -592,7 +613,7 @@ def main():
             log(f"ERROR on call {call_id}: {e}")
             summary["errors"] += 1
 
-    log(f"done: {summary}")
+    log(f"done: {summary} | anthropic tokens: {_usage_totals}")
     if summary["errors"]:
         slack_notify(
             f":warning: Airspeed Sync finished with {summary['errors']} error(s).\n"
