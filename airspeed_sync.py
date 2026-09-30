@@ -36,7 +36,10 @@ CUSTOMERS_DB_ID = "280db974-b757-80f3-a1a0-db38f8c584d4"   # Customer Database
 
 INTERNAL_DOMAINS = {"dobby.io"}
 LOOKBACK_DAYS = 3               # how far back to scan Airspeed for new calls
-MATCH_TOLERANCE_MIN = 30        # start-time window for matching to a record
+MATCH_TOLERANCE_MIN = 90        # start-time window for matching to a record
+                               # (wide enough to catch short-notice reschedules;
+                               # safe since best_match requires a shared e-mail or
+                               # external domain, not just a shared internal one)
 MAX_LIST_PAGES = 5              # safety cap on Airspeed list pagination
 NOTION_VERSION = "2022-06-28"
 
