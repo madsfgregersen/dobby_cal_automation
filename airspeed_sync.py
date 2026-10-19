@@ -39,6 +39,9 @@ MEETINGS_DB_ID = "280db974-b757-8050-b523-c091e4c3ffd3"    # Meeting Notes DB
 CUSTOMERS_DB_ID = "280db974-b757-80f3-a1a0-db38f8c584d4"   # Customer Database
 
 INTERNAL_DOMAINS = {"dobby.io"}
+# The Airspeed notetaker account is invited to every recorded meeting, so it is
+# no evidence that a call and a record belong together — never score on it.
+RECORDER_EMAILS = {"support@dobby.io"}
 LOOKBACK_DAYS = 3               # how far back to scan Airspeed for new calls
 MIN_CALL_SECONDS = 180          # skip calls shorter than 3 min (no-shows / quick
                                # check-ins) — not worth a summary, saves API cost
@@ -218,6 +221,13 @@ def candidate_records(start):
     }
     data = notion_request("POST", url, data=json.dumps(payload))
     return data.get("results", [])
+
+
+def record_call_id(page):
+    return "".join(
+        t.get("plain_text", "")
+        for t in page.get("properties", {}).get(P_AIRSPEED_ID, {}).get("rich_text", [])
+    ).strip()
 
 
 def record_participant_emails(page):
@@ -532,10 +542,18 @@ def best_match(call, candidates):
     (customer) domain means an ambiguous call becomes its own orphan record
     instead of polluting an unrelated meeting."""
     call_emails, call_domains = call_emails_and_domains(call)
+    call_emails -= RECORDER_EMAILS
     call_ext_domains = call_domains - INTERNAL_DOMAINS
     best, best_score = None, 0
     for page in candidates:
-        rec_emails = record_participant_emails(page)
+        # A record already holding a DIFFERENT call's summary is taken. Without
+        # this, two calls that both fit one record overwrite each other on every
+        # poll (hit 2026-10-19: a rescheduled CS Team weekly ping-ponged with a
+        # Zepbrook training on the Zepbrook record).
+        claimed = record_call_id(page)
+        if claimed and claimed != call.get("id"):
+            continue
+        rec_emails = record_participant_emails(page) - RECORDER_EMAILS
         rec_ext_domains = {e.split("@")[-1] for e in rec_emails} - INTERNAL_DOMAINS
         score = 10 * len(call_emails & rec_emails) + len(call_ext_domains & rec_ext_domains)
         if score > best_score:
