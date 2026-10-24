@@ -2,9 +2,20 @@
 name: Meeting Sync
  
 on:
+  # Working hours: Google Cloud Scheduler (job `meeting-sync-trigger`, every 15 min,
+  # Mon–Fri 07:00–18:45 Copenhagen) starts this via the workflow_dispatch API, so
+  # same-day reschedules reach Notion before the Airspeed summary needs to match
+  # them. GitHub's own cron is best-effort (runs land 3–5h apart) and is kept only
+  # as an off-hours/weekend backstop.
   schedule:
-    - cron: "0 * * * *"      # hourly, on the hour (GitHub runs this best-effort)
-  workflow_dispatch: {}       # lets you run it manually from the Actions tab
+    - cron: "0 * * * *"
+  workflow_dispatch: {}       # Cloud Scheduler + manual runs from the Actions tab
+
+# Never run two syncs at once (a scheduler run and a cron run could otherwise
+# overlap and both create the same new meeting record). Queue, don't cancel.
+concurrency:
+  group: meeting-sync
+  cancel-in-progress: false
  
 permissions:
   contents: read
