@@ -230,6 +230,26 @@ def record_call_id(page):
     ).strip()
 
 
+# Words too common in meeting titles to say two titles are about the same thing.
+GENERIC_TITLE_WORDS = {
+    "dobby", "meeting", "weekly", "status", "check", "call", "sync", "with",
+    "and", "the", "for", "x", "ii", "og", "med", "session", "follow", "up",
+    "followup", "catch", "update", "review", "discussion", "in", "on", "of",
+}
+
+
+def title_tokens(title):
+    words = re.findall(r"[0-9a-zA-Z\u00c0-\u024f]+", (title or "").lower())
+    return {w for w in words if len(w) >= 2 and w not in GENERIC_TITLE_WORDS}
+
+
+def record_title(page):
+    return "".join(
+        t.get("plain_text", "")
+        for t in page.get("properties", {}).get(P_TITLE, {}).get("title", [])
+    )
+
+
 def record_status(page):
     sel = page.get("properties", {}).get(P_STATUS, {}).get("select") or {}
     return sel.get("name") or ""
@@ -556,13 +576,14 @@ def best_match(call, candidates):
     (customer) domain means an ambiguous call becomes its own orphan record
     instead of polluting an unrelated meeting.
 
-    Ties (common when external guests join without e-mails, so only an internal
-    attendee like mg@ is shared) go to the record whose start time is closest to
-    the call's. Cancelled records are never candidates."""
+    When only INTERNAL attendees are shared, the titles must also share a
+    meaningful word. Ties go to more shared title words, then to the record whose
+    start time is closest to the call's. Cancelled records are never candidates."""
     call_emails, call_domains = call_emails_and_domains(call)
     call_emails -= RECORDER_EMAILS
     call_ext_domains = call_domains - INTERNAL_DOMAINS
     call_start = parse_dt(call["start_time"]) if call.get("start_time") else None
+    call_title = title_tokens(call.get("title"))
     best, best_key = None, None
     for page in candidates:
         # A record already holding a DIFFERENT call's summary is taken. Without
@@ -576,13 +597,23 @@ def best_match(call, candidates):
             continue
         rec_emails = record_participant_emails(page) - RECORDER_EMAILS
         rec_ext_domains = {e.split("@")[-1] for e in rec_emails} - INTERNAL_DOMAINS
-        score = 10 * len(call_emails & rec_emails) + len(call_ext_domains & rec_ext_domains)
+        shared = call_emails & rec_emails
+        shared_ext = ({e for e in shared if e.split("@")[-1] not in INTERNAL_DOMAINS}
+                      or (call_ext_domains & rec_ext_domains))
+        score = 10 * len(shared) + len(call_ext_domains & rec_ext_domains)
         if score <= 0:
+            continue
+        title_overlap = len(call_title & title_tokens(record_title(page)))
+        # Colleagues sit in many meetings a day, so sharing only INTERNAL
+        # attendees is weak evidence: also require the titles to share a
+        # meaningful word. Without this, an unscheduled "Status meeting Joogie"
+        # (only msa@ identifiable) landed on a same-hour CS weekly (2026-10-30).
+        if not shared_ext and title_overlap == 0:
             continue
         rec_start = record_start(page)
         gap = (abs((rec_start - call_start).total_seconds())
                if rec_start and call_start else float("inf"))
-        key = (score, -gap)
+        key = (score, title_overlap, -gap)
         if best_key is None or key > best_key:
             best, best_key = page, key
     return best
