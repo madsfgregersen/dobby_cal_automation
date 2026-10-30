@@ -230,6 +230,20 @@ def record_call_id(page):
     ).strip()
 
 
+def record_status(page):
+    sel = page.get("properties", {}).get(P_STATUS, {}).get("select") or {}
+    return sel.get("name") or ""
+
+
+def record_start(page):
+    date = page.get("properties", {}).get(P_DATE, {}).get("date") or {}
+    start = date.get("start")
+    if not start:
+        return None
+    d = parse_dt(start) if "T" in start else parse_dt(start + "T00:00:00+00:00")
+    return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+
+
 def record_participant_emails(page):
     text = "".join(
         t.get("plain_text", "")
@@ -540,11 +554,16 @@ def best_match(call, candidates):
     would cross-file the call onto any unrelated meeting in the same slot that
     happens to include a colleague. Requiring a shared e-mail or a shared external
     (customer) domain means an ambiguous call becomes its own orphan record
-    instead of polluting an unrelated meeting."""
+    instead of polluting an unrelated meeting.
+
+    Ties (common when external guests join without e-mails, so only an internal
+    attendee like mg@ is shared) go to the record whose start time is closest to
+    the call's. Cancelled records are never candidates."""
     call_emails, call_domains = call_emails_and_domains(call)
     call_emails -= RECORDER_EMAILS
     call_ext_domains = call_domains - INTERNAL_DOMAINS
-    best, best_score = None, 0
+    call_start = parse_dt(call["start_time"]) if call.get("start_time") else None
+    best, best_key = None, None
     for page in candidates:
         # A record already holding a DIFFERENT call's summary is taken. Without
         # this, two calls that both fit one record overwrite each other on every
@@ -553,12 +572,20 @@ def best_match(call, candidates):
         claimed = record_call_id(page)
         if claimed and claimed != call.get("id"):
             continue
+        if record_status(page) == "Cancelled":
+            continue
         rec_emails = record_participant_emails(page) - RECORDER_EMAILS
         rec_ext_domains = {e.split("@")[-1] for e in rec_emails} - INTERNAL_DOMAINS
         score = 10 * len(call_emails & rec_emails) + len(call_ext_domains & rec_ext_domains)
-        if score > best_score:
-            best, best_score = page, score
-    return best if best_score > 0 else None
+        if score <= 0:
+            continue
+        rec_start = record_start(page)
+        gap = (abs((rec_start - call_start).total_seconds())
+               if rec_start and call_start else float("inf"))
+        key = (score, -gap)
+        if best_key is None or key > best_key:
+            best, best_key = page, key
+    return best
 
 
 def handle_call(call, domain_map, summary):
