@@ -48,3 +48,43 @@ jobs:
             if [ "$SECONDS" -ge "$deadline" ]; then break; fi
             sleep 90
           done
+
+  # Sends the notetaker to meetings OTHER companies organize (their invites
+  # never include support@dobby.io, so Airspeed can't auto-join them). Runs in
+  # parallel with the summary loop and polls every 60s for the same ~28 min.
+  notetaker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write             # REQUIRED — WIF token for keyless Google auth
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Authenticate to Google (keyless, via Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: "projects/975330914917/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+          service_account: "meeting-sync@dobby-workspace-automations.iam.gserviceaccount.com"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run notetaker dispatch (polls every 60s through the window)
+        env:
+          GLYPHIC_API_KEY: ${{ secrets.GLYPHIC_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          CALENDAR_USERS: ${{ vars.CALENDAR_USERS }}
+          USER_SOURCE: ${{ vars.USER_SOURCE }}
+          DIRECTORY_ADMIN: ${{ vars.DIRECTORY_ADMIN }}
+          USER_EXCLUDE: ${{ vars.USER_EXCLUDE }}
+          # Optional: comma-separated subset to pin the dispatch to.
+          NOTETAKER_USERS: ${{ vars.NOTETAKER_USERS }}
+          # Safety: stays in dry-run (sends nothing) unless the repo variable
+          # NOTETAKER_DRY_RUN is set to "false".
+          DRY_RUN: ${{ vars.NOTETAKER_DRY_RUN || 'true' }}
+          RUN_SECONDS: "1680"         # ~28 min, < the 30-min Cloud Scheduler trigger
+        run: python notetaker_dispatch.py
