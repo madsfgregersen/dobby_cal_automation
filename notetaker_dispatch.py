@@ -73,6 +73,12 @@ JOIN_LATE_MIN = 10       # ...and still send it up to 10 min after the start
 MIN_PARTICIPANTS = 2
 POLL_SECONDS = 60
 RUN_SECONDS = int(os.environ.get("RUN_SECONDS", "1680"))   # ~28 min, < the 30-min trigger
+# Google's sign-in endpoint occasionally returns a 5xx or times out for a single
+# request. Retry those a few times, and only count a calendar as an error (which
+# fails the run) once it has been unreachable this many polls in a row — one
+# missed 60s poll can't make us miss a meeting (the join window is 12 min).
+TOKEN_RETRY_DELAYS = (2, 5)          # seconds between the 3 attempts
+CALENDAR_FAIL_LIMIT = 3              # consecutive failed polls before it's an error
 
 LOCAL_TZ = "Europe/Copenhagen"
 ACTIVE_START_HOUR = 6    # inclusive, local time
@@ -268,16 +274,35 @@ class TokenCache:
     def get(self, user):
         tok, minted = self.tokens.get(user, (None, 0))
         if not tok or time.time() - minted > 45 * 60:
-            tok = gcal.delegated_user_token(self.adc, user)
+            tok = mint_token_with_retry(self.adc, user)
             self.tokens[user] = (tok, time.time())
         return tok
+
+
+def _transient(exc):
+    """Timeouts, dropped connections and Google 5xx/429 — worth retrying.
+    A 4xx (e.g. a missing delegation scope) is a real problem: don't retry."""
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    resp = getattr(exc, "response", None)
+    return resp is not None and (resp.status_code == 429 or resp.status_code >= 500)
+
+
+def mint_token_with_retry(adc, user):
+    for delay in TOKEN_RETRY_DELAYS + (None,):
+        try:
+            return gcal.delegated_user_token(adc, user)
+        except Exception as e:
+            if delay is None or not _transient(e):
+                raise
+            time.sleep(delay)
 
 
 def in_active_hours():
     return ACTIVE_START_HOUR <= dt.datetime.now(ZoneInfo(LOCAL_TZ)).hour < ACTIVE_END_HOUR
 
 
-def poll(users, tokens, sent_links, summary):
+def poll(users, tokens, sent_links, summary, fail_streak):
     now = dt.datetime.now(dt.timezone.utc)
     t_min = (now - dt.timedelta(minutes=JOIN_LATE_MIN + 5)).isoformat()
     t_max = (now + dt.timedelta(minutes=JOIN_EARLY_MIN + 1)).isoformat()
@@ -294,9 +319,19 @@ def poll(users, tokens, sent_links, summary):
                 if link:
                     key = (link, start_key(event_start(ev)))
                     groups.setdefault(key, []).append((user, token, ev))
+            if fail_streak.get(user):
+                log(f"calendar for {user} readable again "
+                    f"after {fail_streak[user]} failed poll(s)")
+            fail_streak[user] = 0
         except Exception as e:
-            log(f"ERROR reading calendar for {user}: {e}")
-            summary["errors"] += 1
+            fail_streak[user] = fail_streak.get(user, 0) + 1
+            if fail_streak[user] == CALENDAR_FAIL_LIMIT:
+                log(f"ERROR reading calendar for {user} "
+                    f"({CALENDAR_FAIL_LIMIT} polls in a row): {e}")
+                summary["errors"] += 1
+            else:
+                log(f"WARNING: couldn't read calendar for {user} "
+                    f"(poll {fail_streak[user]} in a row, will retry): {e}")
 
     for key, copies in groups.items():
         link = key[0]
@@ -352,9 +387,10 @@ def main():
     summary = {"would_send": 0, "would_send_dobby_hosted": 0, "sent": 0,
                "already": 0, "errors": 0}
     sent_links = set()
+    fail_streak = {}      # user -> consecutive polls their calendar couldn't be read
     deadline = time.time() + RUN_SECONDS
     while True:
-        poll(users, tokens, sent_links, summary)
+        poll(users, tokens, sent_links, summary, fail_streak)
         if time.time() + POLL_SECONDS >= deadline or not in_active_hours():
             break
         time.sleep(POLL_SECONDS)
