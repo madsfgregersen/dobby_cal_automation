@@ -87,4 +87,8 @@ jobs:
           # NOTETAKER_DRY_RUN is set to "false".
           DRY_RUN: ${{ vars.NOTETAKER_DRY_RUN || 'true' }}
           RUN_SECONDS: "1680"         # ~28 min, < the 30-min Cloud Scheduler trigger
+          # Step-back: skip meetings a personal recorder (own Airspeed notetaker)
+          # has accepted. Same repo variables as attendee-sync.yml.
+          PERSONAL_RECORDERS: ${{ vars.PERSONAL_RECORDERS || 'mh@dobby.io, dm@dobby.io' }}
+          STEP_BACK_DRY_RUN: ${{ vars.STEP_BACK_DRY_RUN || 'true' }}
         run: python notetaker_dispatch.py

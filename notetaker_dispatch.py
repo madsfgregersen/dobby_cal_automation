@@ -17,7 +17,10 @@ A meeting is dispatched when, on a Dobby user's calendar, it:
   * has a Teams / Zoom / Meet link, is not cancelled and not marked private,
   * has at least two people and doesn't already include the recorder,
   * doesn't contain the opt-out tag [no-notetaker] in its title or description,
-  * starts between JOIN_EARLY_MIN before and JOIN_LATE_MIN after now.
+  * starts between JOIN_EARLY_MIN before and JOIN_LATE_MIN after now,
+  * and no PERSONAL_RECORDERS person (whose own Airspeed notetaker joins
+    automatically) has accepted it — they record it themselves (step-back,
+    see personal_recorders.py; preview-only until STEP_BACK_DRY_RUN=false).
 
 Each meeting link is sent once, however many colleagues are invited: the
 calendar copies are marked with a private extended property (visible only on
@@ -47,6 +50,7 @@ import requests
 
 import attendee_sync as gcal        # keyless Google auth + calendar helpers
 import directory_users
+import personal_recorders
 
 # ----------------------------------------------------------------- CONFIG ---
 
@@ -265,6 +269,15 @@ def poll(users, tokens, sent_links, summary):
                  f"for {', '.join(sorted({u for u, _, _ in copies}))}]")
         if link in sent_links:
             continue
+        recorders = sorted({r for _, _, ev in copies for r in personal_recorders.present(ev)})
+        if recorders:
+            who = ", ".join(recorders)
+            if not personal_recorders.STEP_BACK_DRY_RUN:
+                log(f"step-back: no notetaker for {where} — {who} records it")
+                sent_links.add(link)
+                summary["step_back"] += 1
+                continue
+            log(f"[STEP-BACK PREVIEW] would skip {where} — {who} records it")
         if DRY_RUN:
             log(f"[DRY-RUN] would send notetaker to {where}")
             sent_links.add(link)
@@ -302,8 +315,10 @@ def main():
     tokens = TokenCache(adc)
     log(f"notetaker dispatch {'(DRY-RUN)' if DRY_RUN else '(LIVE)'} — "
         f"{len(users)} calendars, polling every {POLL_SECONDS}s for {RUN_SECONDS}s")
+    log(f"step-back {'(PREVIEW)' if personal_recorders.STEP_BACK_DRY_RUN else '(LIVE)'} "
+        f"for personal recorders: {', '.join(sorted(personal_recorders.PERSONAL_RECORDERS)) or 'none'}")
 
-    summary = {"would_send": 0, "sent": 0, "already": 0, "errors": 0}
+    summary = {"would_send": 0, "sent": 0, "already": 0, "step_back": 0, "errors": 0}
     sent_links = set()
     deadline = time.time() + RUN_SECONDS
     while True:

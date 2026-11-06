@@ -40,6 +40,12 @@ jobs:
           USER_SOURCE: ${{ vars.USER_SOURCE }}
           DIRECTORY_ADMIN: ${{ vars.DIRECTORY_ADMIN }}
           USER_EXCLUDE: ${{ vars.USER_EXCLUDE }}
+          # Step-back: people whose own Airspeed notetaker joins automatically.
+          # When one of them hosts or has accepted a meeting, support@ stays out.
+          # Override with the repo variable PERSONAL_RECORDERS ("none" = off).
+          PERSONAL_RECORDERS: ${{ vars.PERSONAL_RECORDERS || 'mh@dobby.io, dm@dobby.io' }}
+          # Preview (logs only) until the repo variable STEP_BACK_DRY_RUN is "false".
+          STEP_BACK_DRY_RUN: ${{ vars.STEP_BACK_DRY_RUN || 'true' }}
           # Safety: stays in dry-run (writes nothing) unless you set the repo
           # variable ATTENDEE_SYNC_DRY_RUN to "false".
           DRY_RUN: ${{ vars.ATTENDEE_SYNC_DRY_RUN || 'true' }}
