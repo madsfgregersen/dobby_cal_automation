@@ -14,9 +14,9 @@ It's idempotent — a meeting that already has support@dobby.io is skipped — s
 it's safe to run on a schedule and safe to re-run.
 
 Step-back: when a PERSONAL_RECORDERS person (someone whose own Airspeed
-notetaker joins automatically) hosts or has accepted the meeting, support@ is
-left out — and removed if it's already on the invite — so the call doesn't get
-two notetakers. See personal_recorders.py. Preview-only until
+notetaker joins automatically) hosts the meeting, support@ is left out — and
+removed if it's already on the invite — so the call doesn't get two
+notetakers. See personal_recorders.py. Preview-only until
 STEP_BACK_DRY_RUN=false.
 
 DRY-RUN by default: it logs every meeting it *would* patch without changing
@@ -325,10 +325,9 @@ def main():
             has_recorder = RECORDER_EMAIL in [a.get("email", "").lower() for a in attendees]
             where = f"'{meta['title']}' @ {meta['start']} (organizer {user}, event {target_id})"
 
-            # Step-back: a personal notetaker will record this one.
-            recorders = pr.present(full)
-            if recorders:
-                who = ", ".join(recorders)
+            # Step-back: the host's own notetaker records this one.
+            who = pr.host(full)
+            if who:
                 if step_back_live:
                     if has_recorder:
                         patch_remove_recorder(user, token, target_id, attendees)

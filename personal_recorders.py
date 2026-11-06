@@ -2,16 +2,18 @@
 Personal recorders — Dobby people whose OWN Airspeed notetaker joins their
 meetings automatically (their calendar is connected in Airspeed).
 
-When one of them hosts a meeting, or has accepted it, their personal notetaker
-records it, so the shared recorder (support@dobby.io) steps back to avoid two
-notetakers in the same call:
-  * attendee_sync.py doesn't add support@ to that meeting, and removes it if it
-    is already on the invite;
-  * notetaker_dispatch.py doesn't send the notetaker to it.
+One recorder per meeting, decided by who HOSTS it:
+  * hosted by a personal recorder -> their own notetaker records it, and
+    attendee_sync.py keeps support@dobby.io off the invite (removing it if
+    it's already there);
+  * hosted by anyone else -> support@ (or notetaker_dispatch.py for meetings
+    hosted outside Dobby) records it.
 
-"Accepted" (not tentative) matches the Airspeed recording preference
-"Only record meetings that have been accepted", which should be ON and locked
-for this to be reliable.
+This relies on the Airspeed recording preference "Only record meetings where
+the individual is the host" being ON (and locked) for these people. Otherwise
+their notetaker also joins meetings they merely attend, where support@ is
+already recording — and two personal recorders invited to the same meeting
+would both join (the 4 Nov "KIP" duplicate).
 
 Config (repo variables):
   PERSONAL_RECORDERS  comma-separated e-mails, e.g. "mh@dobby.io, dm@dobby.io".
@@ -35,17 +37,14 @@ STEP_BACK_DRY_RUN = (
 )
 
 
-def present(ev, recorders=None):
-    """Sorted personal recorders whose notetaker will join this meeting: the
-    host (unless they declined their own meeting) or a guest who accepted."""
+def host(ev, recorders=None):
+    """The personal recorder hosting this meeting (whose own notetaker will
+    record it), or None. A host who declined their own meeting doesn't count."""
     recorders = PERSONAL_RECORDERS if recorders is None else recorders
-    if not recorders:
-        return []
-    status = {(a.get("email") or "").lower(): a.get("responseStatus")
-              for a in ev.get("attendees", []) or []}
     organizer = ((ev.get("organizer") or {}).get("email") or "").lower()
-    found = set()
-    if organizer in recorders and status.get(organizer) != "declined":
-        found.add(organizer)
-    found |= {e for e, s in status.items() if e in recorders and s == "accepted"}
-    return sorted(found)
+    if organizer not in recorders:
+        return None
+    for a in ev.get("attendees", []) or []:
+        if (a.get("email") or "").lower() == organizer and a.get("responseStatus") == "declined":
+            return None
+    return organizer
