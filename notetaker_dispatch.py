@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Notetaker Dispatch — sends the Airspeed notetaker to meetings that OTHER
-companies organize.
+Notetaker Dispatch — sends the Airspeed notetaker straight to a meeting's link
+when it's about to start and the recorder isn't on the invite.
 
 The notetaker joins automatically only when the recorder (support@dobby.io) is
 on the invite. attendee_sync.py adds it to meetings Dobby people organize, but a
@@ -11,17 +11,25 @@ about it. This script closes that gap: it watches every Dobby calendar and,
 just before such a meeting starts, asks Airspeed to send the notetaker to the
 meeting link directly (POST /v1/call_bots).
 
+It also covers Dobby-hosted meetings that reach their start time without
+support@ on the invite — typically ones created at the last minute, since
+attendee_sync.py runs on GitHub's best-effort cron (in practice only a few
+times a day). Those are preview-only until the repo variable
+NOTETAKER_DOBBY_HOSTED_DRY_RUN is "false".
+
 A meeting is dispatched when, on a Dobby user's calendar, it:
-  * is organized OUTSIDE Dobby (Dobby-organized meetings are attendee_sync's job),
-  * has been accepted (or tentatively accepted) by that user,
+  * has been accepted (or tentatively accepted) by that user, or that user
+    is the host,
   * has a Teams / Zoom / Meet link, is not cancelled and not marked private,
   * has at least two people and doesn't already include the recorder,
   * doesn't contain the opt-out tag [no-notetaker] in its title or description,
   * starts between JOIN_EARLY_MIN before and JOIN_LATE_MIN after now.
 
-Each meeting link is sent once, however many colleagues are invited: the
-calendar copies are marked with a private extended property (visible only on
-that person's own copy), so later polls and later runs skip it. The invite's
+Each meeting is sent once, however many colleagues are invited: the calendar
+copies are marked with a private extended property (visible only on that
+person's own copy) recording the start time it was sent for, so later polls
+and later runs skip it — but if the meeting is moved to a new time, it gets
+a fresh notetaker at the new time. The invite's
 attendee list is passed along, so the recording carries real e-mail addresses
 even when guests join Teams without one — which also helps airspeed_sync.py
 file the summary on the right Notion page.
@@ -57,7 +65,8 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 RECORDER_EMAIL = (os.environ.get("RECORDER_EMAIL") or "support@dobby.io").lower()
 INTERNAL_DOMAINS = {"dobby.io"}
 OPT_OUT_TAG = "[no-notetaker]"
-MARKER_KEY = "dobbyNotetakerSentAt"     # private extended property on each copy
+MARKER_KEY = "dobbyNotetakerSentAt"     # private extended property on each copy: when sent
+MARKER_START_KEY = "dobbyNotetakerSentFor"   # ...and for which start time (UTC)
 
 JOIN_EARLY_MIN = 2       # send the notetaker up to 2 min before the start
 JOIN_LATE_MIN = 10       # ...and still send it up to 10 min after the start
@@ -70,6 +79,9 @@ ACTIVE_START_HOUR = 6    # inclusive, local time
 ACTIVE_END_HOUR = 22     # exclusive, local time
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() not in ("false", "0", "no")
+# Dobby-hosted meetings without support@ (see docstring): preview until "false".
+DOBBY_HOSTED_DRY_RUN = (os.environ.get("DOBBY_HOSTED_DRY_RUN", "true").strip().lower()
+                        not in ("false", "0", "no"))
 
 # Meeting links we can hand to Airspeed. Teams links other than the join links
 # (e.g. "meetingOptions" in the invite footer) are deliberately not matched.
@@ -137,6 +149,30 @@ def event_start(ev):
     return dt.datetime.fromisoformat(s.replace("Z", "+00:00")) if s else None
 
 
+def start_key(start):
+    """Canonical UTC form of a start time, for the 'sent for' marker."""
+    return start.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def already_sent(ev, start):
+    """True if this calendar copy was already given a notetaker for THIS start
+    time. A meeting moved to a new time counts as not sent."""
+    private = (ev.get("extendedProperties") or {}).get("private") or {}
+    sent_for = private.get(MARKER_START_KEY)
+    if sent_for:
+        return sent_for == start_key(start)
+    sent_at = private.get(MARKER_KEY)
+    if not sent_at:
+        return False
+    # Marker from before MARKER_START_KEY existed: it was sent for this start
+    # only if it was sent around this start.
+    try:
+        sent = dt.datetime.fromisoformat(sent_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return abs(sent - start) <= dt.timedelta(minutes=JOIN_EARLY_MIN + JOIN_LATE_MIN + 5)
+
+
 def qualifies(ev, now):
     """Return the meeting link if this calendar copy should get the notetaker."""
     if ev.get("status") == "cancelled":
@@ -144,8 +180,8 @@ def qualifies(ev, now):
     if ev.get("visibility") in ("private", "confidential"):
         return None
     organizer = (ev.get("organizer") or {}).get("email", "")
-    if not organizer or _domain(organizer) in INTERNAL_DOMAINS:
-        return None                      # Dobby-organized: attendee_sync's job
+    if not organizer:
+        return None
     start = event_start(ev)
     if not start:
         return None                      # all-day event
@@ -153,7 +189,9 @@ def qualifies(ev, now):
             <= start + dt.timedelta(minutes=JOIN_LATE_MIN)):
         return None
     me = next((a for a in ev.get("attendees", []) or [] if a.get("self")), None)
-    if not me or me.get("responseStatus") not in ("accepted", "tentative"):
+    is_host = bool((ev.get("organizer") or {}).get("self"))
+    status = me.get("responseStatus") if me else ("accepted" if is_host else None)
+    if status not in ("accepted", "tentative") and not (is_host and status != "declined"):
         return None
     attendees = ev.get("attendees", []) or []
     if any((a.get("email") or "").lower() == RECORDER_EMAIL for a in attendees):
@@ -163,8 +201,8 @@ def qualifies(ev, now):
     text = f"{ev.get('summary') or ''}\n{ev.get('description') or ''}".lower()
     if OPT_OUT_TAG in text:
         return None
-    if ((ev.get("extendedProperties") or {}).get("private") or {}).get(MARKER_KEY):
-        return None                      # already sent from this copy
+    if already_sent(ev, start):
+        return None                      # already sent for this start time
     return meeting_url(ev)
 
 
@@ -175,6 +213,7 @@ def mark_sent(user, token, ev, stamp):
            f"{urllib.parse.quote(user)}/events/{urllib.parse.quote(ev['id'])}")
     private = dict(((ev.get("extendedProperties") or {}).get("private")) or {})
     private[MARKER_KEY] = stamp
+    private[MARKER_START_KEY] = start_key(event_start(ev))
     gcal._g_request("PATCH", url, token, params={"sendUpdates": "none"},
                     json_body={"extendedProperties": {"private": private}})
 
@@ -243,8 +282,9 @@ def poll(users, tokens, sent_links, summary):
     t_min = (now - dt.timedelta(minutes=JOIN_LATE_MIN + 5)).isoformat()
     t_max = (now + dt.timedelta(minutes=JOIN_EARLY_MIN + 1)).isoformat()
 
-    # Group qualifying calendar copies by meeting link, so a meeting several
-    # colleagues attend gets ONE notetaker.
+    # Group qualifying calendar copies by meeting link + start time, so a
+    # meeting several colleagues attend gets ONE notetaker, and a meeting
+    # moved to a new time is a new meeting.
     groups = {}
     for user in users:
         try:
@@ -252,27 +292,31 @@ def poll(users, tokens, sent_links, summary):
             for ev in gcal.list_events(user, token, t_min, t_max):
                 link = qualifies(ev, now)
                 if link:
-                    groups.setdefault(link, []).append((user, token, ev))
+                    key = (link, start_key(event_start(ev)))
+                    groups.setdefault(key, []).append((user, token, ev))
         except Exception as e:
             log(f"ERROR reading calendar for {user}: {e}")
             summary["errors"] += 1
 
-    for link, copies in groups.items():
+    for key, copies in groups.items():
+        link = key[0]
         user0, _, ev0 = copies[0]
         start_local = event_start(ev0).astimezone(ZoneInfo(LOCAL_TZ)).strftime("%a %H:%M")
         where = (f"'{ev0.get('summary') or '(no title)'}' {start_local} "
                  f"[{urllib.parse.urlsplit(link).hostname}, organizer @{_domain(ev0['organizer']['email'])}, "
                  f"for {', '.join(sorted({u for u, _, _ in copies}))}]")
-        if link in sent_links:
+        if key in sent_links:
             continue
-        if DRY_RUN:
-            log(f"[DRY-RUN] would send notetaker to {where}")
-            sent_links.add(link)
-            summary["would_send"] += 1
+        dobby_hosted = _domain(ev0["organizer"]["email"]) in INTERNAL_DOMAINS
+        if DRY_RUN or (dobby_hosted and DOBBY_HOSTED_DRY_RUN):
+            label = "[PREVIEW Dobby-hosted]" if dobby_hosted else "[DRY-RUN]"
+            log(f"{label} would send notetaker to {where}")
+            sent_links.add(key)
+            summary["would_send_dobby_hosted" if dobby_hosted else "would_send"] += 1
             continue
         try:
             result = send_notetaker(link, ev0)
-            sent_links.add(link)
+            sent_links.add(key)
             summary["sent" if result == "sent" else "already"] += 1
             log(f"notetaker {'sent to' if result == 'sent' else 'already in'} {where}")
         except Exception as e:
@@ -301,9 +345,12 @@ def main():
     users = get_users(adc)
     tokens = TokenCache(adc)
     log(f"notetaker dispatch {'(DRY-RUN)' if DRY_RUN else '(LIVE)'} — "
-        f"{len(users)} calendars, polling every {POLL_SECONDS}s for {RUN_SECONDS}s")
+        f"{len(users)} calendars, polling every {POLL_SECONDS}s for {RUN_SECONDS}s; "
+        f"Dobby-hosted meetings without support@: "
+        f"{'preview' if DOBBY_HOSTED_DRY_RUN else 'live'}")
 
-    summary = {"would_send": 0, "sent": 0, "already": 0, "errors": 0}
+    summary = {"would_send": 0, "would_send_dobby_hosted": 0, "sent": 0,
+               "already": 0, "errors": 0}
     sent_links = set()
     deadline = time.time() + RUN_SECONDS
     while True:

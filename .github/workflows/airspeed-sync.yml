@@ -86,5 +86,9 @@ jobs:
           # Safety: stays in dry-run (sends nothing) unless the repo variable
           # NOTETAKER_DRY_RUN is set to "false".
           DRY_RUN: ${{ vars.NOTETAKER_DRY_RUN || 'true' }}
+          # Dobby-hosted meetings that start without support@ on the invite (e.g.
+          # created at the last minute): preview until NOTETAKER_DOBBY_HOSTED_DRY_RUN
+          # is set to "false".
+          DOBBY_HOSTED_DRY_RUN: ${{ vars.NOTETAKER_DOBBY_HOSTED_DRY_RUN || 'true' }}
           RUN_SECONDS: "1680"         # ~28 min, < the 30-min Cloud Scheduler trigger
         run: python notetaker_dispatch.py
