@@ -13,12 +13,6 @@ delegation, no key files), a windowed read of each calendar, and no database.
 It's idempotent — a meeting that already has support@dobby.io is skipped — so
 it's safe to run on a schedule and safe to re-run.
 
-Step-back: when a PERSONAL_RECORDERS person (someone whose own Airspeed
-notetaker joins automatically) hosts the meeting, support@ is left out — and
-removed if it's already on the invite — so the call doesn't get two
-notetakers. See personal_recorders.py. Preview-only until
-STEP_BACK_DRY_RUN=false.
-
 DRY-RUN by default: it logs every meeting it *would* patch without changing
 anything. Set DRY_RUN=false to enable live patches.
 
@@ -37,7 +31,6 @@ import google.auth
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 import directory_users
-import personal_recorders
 
 # ----------------------------------------------------------------- CONFIG ---
 
@@ -211,17 +204,6 @@ def patch_add_recorder(calendar_id, token, event_id, existing_attendees):
     return _g_request("PATCH", url, token, params={"sendUpdates": "none"}, json_body=body)
 
 
-def patch_remove_recorder(calendar_id, token, event_id, existing_attendees):
-    """Take the recorder off the event (silently), keeping everyone else."""
-    url = (
-        "https://www.googleapis.com/calendar/v3/calendars/"
-        f"{urllib.parse.quote(calendar_id)}/events/{urllib.parse.quote(event_id)}"
-    )
-    body = {"attendees": [a for a in existing_attendees
-                          if (a.get("email") or "").lower() != RECORDER_EMAIL]}
-    return _g_request("PATCH", url, token, params={"sendUpdates": "none"}, json_body=body)
-
-
 # --------------------------------------------------------------- CORE LOOP ---
 
 def _attendee_emails(event):
@@ -238,9 +220,8 @@ def qualifies(ev, user_email):
       * organized by this user (only the organizer's copy can add a guest),
       * not cancelled,
       * a real meeting with a video link (skips personal blocks / OOO / focus),
-      * at least MIN_PARTICIPANTS people.
-    Whether the recorder is already on it is decided per target in main(),
-    because step-back may need to take it off again."""
+      * at least MIN_PARTICIPANTS people,
+      * the recorder isn't already on it."""
     if ev.get("status") == "cancelled":
         return False
     if ev.get("visibility") in ("private", "confidential"):
@@ -251,7 +232,9 @@ def qualifies(ev, user_email):
     if not (ev.get("hangoutLink") or ev.get("conferenceData")):
         return False
     emails = _attendee_emails(ev)
-    if len([e for e in emails if e != RECORDER_EMAIL]) < MIN_PARTICIPANTS:
+    if len(emails) < MIN_PARTICIPANTS:
+        return False
+    if RECORDER_EMAIL in emails:
         return False
     return True
 
@@ -281,14 +264,8 @@ def main():
     time_min, time_max = window_bounds()
     log(f"attendee sync {'(DRY-RUN)' if DRY_RUN else '(LIVE)'} — "
         f"{len(users)} calendars, window {time_min} .. {time_max}, recorder {RECORDER_EMAIL}")
-    pr = personal_recorders
-    log(f"step-back {'(PREVIEW)' if pr.STEP_BACK_DRY_RUN else '(LIVE)'} for personal recorders: "
-        f"{', '.join(sorted(pr.PERSONAL_RECORDERS)) or 'none'}")
-    step_back_live = not pr.STEP_BACK_DRY_RUN and not DRY_RUN
 
-    summary = {"would_patch": 0, "patched": 0, "already": 0, "skipped": 0,
-               "step_back_removed": 0, "step_back_left_out": 0,
-               "step_back_would_change": 0, "errors": 0}
+    summary = {"would_patch": 0, "patched": 0, "already": 0, "skipped": 0, "errors": 0}
 
     # --- Discover: which events/series need the recorder. For a recurring
     # occurrence we target the series master (recurringEventId) so one patch
@@ -322,28 +299,10 @@ def main():
                 summary["skipped"] += 1
                 continue
             attendees = full.get("attendees", []) or []
-            has_recorder = RECORDER_EMAIL in [a.get("email", "").lower() for a in attendees]
-            where = f"'{meta['title']}' @ {meta['start']} (organizer {user}, event {target_id})"
-
-            # Step-back: the host's own notetaker records this one.
-            who = pr.host(full)
-            if who:
-                if step_back_live:
-                    if has_recorder:
-                        patch_remove_recorder(user, token, target_id, attendees)
-                        log(f"step-back: removed {RECORDER_EMAIL} from {where} — {who} records it")
-                        summary["step_back_removed"] += 1
-                    else:
-                        summary["step_back_left_out"] += 1
-                    continue
-                verb = "remove" if has_recorder else "leave out"
-                log(f"[STEP-BACK PREVIEW] would {verb} {RECORDER_EMAIL} on {where} — {who} records it")
-                summary["step_back_would_change"] += 1
-                # preview: fall through and behave exactly as before
-
-            if has_recorder:
+            if RECORDER_EMAIL in [a.get("email", "").lower() for a in attendees]:
                 summary["already"] += 1
                 continue
+            where = f"'{meta['title']}' @ {meta['start']} (organizer {user}, event {target_id})"
             if DRY_RUN:
                 log(f"[DRY-RUN] would add {RECORDER_EMAIL} to {where}")
                 summary["would_patch"] += 1
