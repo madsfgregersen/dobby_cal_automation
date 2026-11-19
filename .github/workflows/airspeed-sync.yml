@@ -42,10 +42,14 @@ jobs:
           # change the Cloud Scheduler interval, adjust this to match.
           # airspeed_sync.py gates itself to CET work hours, so iterations
           # outside the window exit immediately.
-          deadline=$(( SECONDS + 1680 ))    # ~28 minutes (< the 30-min trigger interval)
+          # Don't start another sleep+round that would end past the deadline:
+          # in Nov 2026 the old check let a final round run into the next
+          # trigger, which cancelled the run. 1560s = 26 min, leaving ~2-3 min
+          # for the job's ~1 min setup and one slow final round.
+          deadline=$(( SECONDS + 1560 ))    # ~26 minutes (< the 30-min trigger interval)
           while true; do
             python airspeed_sync.py || true
-            if [ "$SECONDS" -ge "$deadline" ]; then break; fi
+            if [ $(( SECONDS + 90 )) -ge "$deadline" ]; then break; fi
             sleep 90
           done
 

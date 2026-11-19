@@ -98,6 +98,14 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 # company-wide discovery.
 DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() in ("true", "1", "yes")
 
+# Google's sign-in endpoint and Notion occasionally return a 5xx or time out for
+# a single request. Those are retried (RETRY_DELAYS); if one still fails it is
+# logged as a WARNING and picked up by the next run 15 min later. The run only
+# fails on a real error (e.g. a 4xx such as lost access) or when more than
+# TRANSIENT_TOLERANCE items hit glitches in one run (looks like an outage).
+RETRY_DELAYS = (2, 5)        # seconds between the 3 attempts
+TRANSIENT_TOLERANCE = 2
+
 # --------------------------------------------------------------- LOGGING ----
 
 _log_lines = []
@@ -213,15 +221,23 @@ def list_events(user_email, user_token, time_min, time_max):
 
 # ------------------------------------------------------------------ NOTION ---
 
-def notion_request(method, url, **kwargs):
-    """Notion call with basic retry on rate-limit / transient errors."""
+def notion_request(method, url, idempotent=True, **kwargs):
+    """Notion call with basic retry on rate-limit / transient errors.
+    Timeouts are retried only for idempotent calls: a timed-out page CREATE may
+    have gone through, and retrying it could create a duplicate page."""
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Notion-Version": NOTION_VERSION,
         "Content-Type": "application/json",
     }
     for attempt in range(5):
-        r = requests.request(method, url, headers=headers, timeout=30, **kwargs)
+        try:
+            r = requests.request(method, url, headers=headers, timeout=30, **kwargs)
+        except (requests.Timeout, requests.ConnectionError):
+            if not idempotent or attempt >= len(RETRY_DELAYS):
+                raise
+            time.sleep(RETRY_DELAYS[attempt])
+            continue
         if r.status_code == 429 or r.status_code >= 500:
             wait = float(r.headers.get("Retry-After", 1 + attempt))
             time.sleep(wait)
@@ -360,6 +376,7 @@ def create_meeting(event_id, title, start, end, emails, customer_id, area, categ
     notion_request(
         "POST",
         "https://api.notion.com/v1/pages",
+        idempotent=False,
         data=json.dumps({"parent": {"database_id": MEETINGS_DB_ID}, "properties": props}),
     )
 
@@ -481,12 +498,42 @@ def get_calendar_users(adc_token):
     return manual
 
 
+def _transient(exc):
+    """Timeouts, dropped connections and 5xx/429 responses: worth retrying, and
+    harmless to leave for the next run. A 4xx (e.g. a missing delegation scope
+    or a Notion permission problem) is a real error."""
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    resp = getattr(exc, "response", None)
+    return resp is not None and (resp.status_code == 429 or resp.status_code >= 500)
+
+
+def with_retry(fn, *args):
+    for delay in RETRY_DELAYS + (None,):
+        try:
+            return fn(*args)
+        except Exception as e:
+            if delay is None or not _transient(e):
+                raise
+            time.sleep(delay)
+
+
+def record_failure(what, e, summary):
+    if _transient(e):
+        log(f"WARNING: {what} (temporary error, next run will retry): {e}")
+        summary["transient"] += 1
+    else:
+        log(f"ERROR {what}: {e}")
+        summary["errors"] += 1
+
+
 def main():
     if not NOTION_TOKEN:
         log("FATAL: NOTION_TOKEN is not set")
         sys.exit(1)
 
-    summary = {"created": 0, "updated": 0, "cancelled": 0, "skipped": 0, "errors": 0}
+    summary = {"created": 0, "updated": 0, "cancelled": 0, "skipped": 0,
+               "transient": 0, "errors": 0}
 
     adc = google_adc_token()
     domain_map = load_customer_domain_map()
@@ -501,8 +548,8 @@ def main():
     events_by_id = {}
     for user in users:
         try:
-            token = delegated_user_token(adc, user)
-            for ev in list_events(user, token, time_min, time_max):
+            token = with_retry(delegated_user_token, adc, user)
+            for ev in with_retry(list_events, user, token, time_min, time_max):
                 eid = ev.get("id")
                 if not eid:
                     continue
@@ -512,15 +559,18 @@ def main():
                 ):
                     events_by_id[eid] = ev
         except Exception as e:
-            log(f"ERROR reading calendar for {user}: {e}")
-            summary["errors"] += 1
+            record_failure(f"reading calendar for {user}", e, summary)
 
     for ev in events_by_id.values():
         try:
             handle_event(ev, domain_map, user_map, summary)
         except Exception as e:
-            log(f"ERROR on event {ev.get('id')}: {e}")
-            summary["errors"] += 1
+            record_failure(f"on event {ev.get('id')}", e, summary)
+
+    if summary["transient"] > TRANSIENT_TOLERANCE:
+        log(f"ERROR: {summary['transient']} temporary errors in one run "
+            f"(more than {TRANSIENT_TOLERANCE}) — Google or Notion may be down")
+        summary["errors"] += 1
 
     log(f"done: {summary}")
 
